@@ -4,4 +4,4 @@
 # bundled in the packaged Mac app — the app defaults to fastembed (ONNX).
 #
 #   pip install -r requirements-local.txt
-sentence-transformers>=6.1.0
+sentence-transformers>=6.2.0
