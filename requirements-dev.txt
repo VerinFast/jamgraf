@@ -4,7 +4,7 @@
 # hand, which is why the first CI run failed with "No module named pytest".
 -r requirements.txt
 
-pytest>=9.1.1
+pytest>=9.2.0
 # anyio is imported directly by tests that drive async MCP dispatch. It arrives
 # transitively via starlette/httpx too, but a test dependency should be declared
 # where it is used rather than relied on as somebody else's transitive.
