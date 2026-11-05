@@ -6,6 +6,11 @@ test touches a developer's real Keychain — this exercises the module itself wi
 a value we were given and a command interpreter: ``security -i`` reads **one
 command per line**, and the refresh token is minted by the sign-in server, which
 makes it the one value here that comes from off the machine.
+
+The fixtures pin the backend to the Keychain rather than letting the
+platform choose it: this file is about ``security``'s command parser, and
+it has to go on meaning that when the suite runs on a Windows runner.
+``test_wincreds.py`` is the other half.
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ def security(monkeypatch):
         calls.append({"argv": list(argv), "input": kwargs.get("input", "")})
         return Done()
 
+    monkeypatch.setattr(secretstore, "_windows", lambda: False)
     monkeypatch.setattr(secretstore, "_security", lambda: "/usr/bin/security")
     monkeypatch.setattr(subprocess, "run", run)
     return calls
@@ -79,6 +85,7 @@ def test_a_token_with_a_space_or_a_quote_stays_one_word(security):
 
 
 def test_a_missing_security_tool_is_reported_not_worked_around(monkeypatch):
+    monkeypatch.setattr(secretstore, "_windows", lambda: False)
     monkeypatch.setattr(secretstore, "_security", lambda: None)
     assert secretstore.available() is False
     assert "Keychain" in secretstore.unavailable_reason()

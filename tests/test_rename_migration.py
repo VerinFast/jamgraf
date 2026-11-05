@@ -248,6 +248,7 @@ class FakeKeychain:
 @pytest.fixture
 def keychain(monkeypatch):
     k = FakeKeychain()
+    monkeypatch.setattr(secretstore, "_windows", lambda: False)
     monkeypatch.setattr(secretstore, "_security", lambda: "/usr/bin/security")
     monkeypatch.setattr(subprocess, "run", k.run)
     return k
