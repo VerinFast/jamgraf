@@ -60,6 +60,32 @@ def _serve(bind_host: str, port: int, log_level: str) -> uvicorn.Server:
                        log_level=log_level))
 
 
+SHUTDOWN_GRACE = 15
+"""Seconds to let uvicorn finish shutting down before giving up on it."""
+
+
+def _stop(server: uvicorn.Server, thread: threading.Thread) -> None:
+    """Ask uvicorn to stop, and **wait for it**.
+
+    Setting the flag is not stopping. The server runs on a daemon thread, so
+    returning from here lets the interpreter exit and take that thread with it —
+    possibly before uvicorn has run the lifespan shutdown, which is what awaits
+    ``collab.flush_all()``. The flusher only writes text that has been idle for
+    a moment, so the edit most likely to be lost that way is the one the person
+    just typed (issue #19, ``tests/test_collab_shutdown.py``).
+
+    A server that will not stop is reported rather than waited on forever: the
+    app is quitting either way, and silence here would be a claim that the edits
+    were written.
+    """
+    server.should_exit = True
+    thread.join(timeout=SHUTDOWN_GRACE)
+    if thread.is_alive():
+        print(f"[jamgraf] the server did not shut down within "
+              f"{SHUTDOWN_GRACE}s — unsaved edits may not have been written",
+              file=sys.stderr)
+
+
 def _wait_for_port(host: str, port: int, seconds: float = 40) -> bool:
     deadline = time.time() + seconds
     while time.time() < deadline and not _port_open(host, port):
@@ -181,7 +207,9 @@ def _in_browser(host: str, bind_host: str, port: int, reason: str) -> None:
         while thread.is_alive():
             thread.join(0.5)
     except KeyboardInterrupt:
-        server.should_exit = True
+        # Ctrl+C is the ordinary way to stop this mode, so it is also the
+        # ordinary path to losing an edit — see _stop.
+        _stop(server, thread)
 
 
 def main() -> None:
@@ -285,4 +313,4 @@ def main() -> None:
         start_kwargs["gui"] = native.GUI
     webview.start(native.install_deeplinks, (base,), **start_kwargs)  # blocks
 
-    server.should_exit = True  # ask uvicorn to stop; daemon thread exits with us
+    _stop(server, thread)

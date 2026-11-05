@@ -310,3 +310,54 @@ def test_data_already_inside_the_package_is_still_used(monkeypatch, tmp_path,
 
     assert config._checkout_or_user_data() == legacy
     assert "may remove it" in capsys.readouterr().err
+
+
+# --- Quitting, without dropping what was just typed ---------------------------
+
+def test_quitting_waits_for_the_server_to_shut_down():
+    """Setting uvicorn's exit flag is not stopping it.
+
+    The server runs on a daemon thread, so returning from the launcher lets the
+    interpreter exit and kill it — possibly before the lifespan shutdown has
+    awaited `collab.flush_all()`, which is the thing that writes an edit still
+    inside the debounce window (issue #19). Dropping the join makes this red.
+    """
+    order = []
+
+    class Server:
+        should_exit = False
+
+        def __setattr__(self, name, value):
+            order.append(("flag", name, value))
+            object.__setattr__(self, name, value)
+
+    class Thread:
+        def join(self, timeout=None):
+            order.append(("join", timeout))
+
+        def is_alive(self):
+            return False
+
+    shell._stop(Server(), Thread())
+
+    assert order[0] == ("flag", "should_exit", True)
+    assert order[1][0] == "join", "the launcher did not wait for the server"
+    assert order[1][1] == shell.SHUTDOWN_GRACE
+
+
+def test_a_server_that_will_not_stop_is_reported(capsys):
+    """Rather than waited on forever, or passed over in silence — which would
+    read as "your edits were saved"."""
+    class Server:
+        should_exit = False
+
+    class Thread:
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+    shell._stop(Server(), Thread())
+
+    assert "may not have been written" in capsys.readouterr().err
