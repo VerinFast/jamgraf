@@ -124,7 +124,8 @@ def _mcp_config_path() -> str:
     import json
 
     path = config.DATA_DIR / "mcp-chat.json"
-    path.write_text(json.dumps(config.mcp_server_config(), indent=2))
+    path.write_text(json.dumps(config.mcp_server_config(), indent=2),
+                    encoding="utf-8")
     return str(path)
 
 

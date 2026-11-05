@@ -142,9 +142,30 @@ Worth stating plainly, because the honest answer is not "all of it".
   about updating.
 * **Covered by the `windows-latest` CI job and nothing else.** The ctypes
   marshalling in `wincreds._load` (struct layout, blob pointer, `CredFree`), the
-  registry walk, that the whole suite passes on Windows at all, and that
-  `jamgraf[desktop]` resolves and imports there. A runner has no interactive
-  desktop, so it cannot open a window.
+  registry walk, and that `jamgraf[desktop]` resolves and imports there. A
+  runner has no interactive desktop, so it cannot open a window.
+* **Reported, not gated.** `pytest-windows` runs the Windows-relevant half of
+  the suite and gates on it. The whole suite does **not** pass on Windows yet,
+  so `pytest-windows-survey` runs it and is allowed to fail rather than
+  pretending otherwise. The first run of that job found 63 failures and was
+  worth every minute: six were this build's, two were real portability bugs it
+  would otherwise have shipped (see below), and the rest are pre-existing macOS
+  assumptions — bash release tooling, `.app` bundles and `~/Library` paths, and
+  one genuine platform limitation: Windows will not rename or delete an open
+  file, and `db.py`'s connection cache is thread-local, so a wiki rename cannot
+  close a handle another thread holds. That last one is a product limitation on
+  Windows, not a test problem, and it needs work inside the infrastructure
+  chokepoint rather than here.
+* **Found by that CI job, and fixed.** Two things the Mac suite could not see.
+  The markdown export opened its files with `open(..., "w")` — the platform's
+  default codec, UTF-8 on macOS and cp1252 on Windows — while the importer reads
+  strict UTF-8, so on Windows the export half of rule 12 produced files its own
+  import half refused, for any page containing an em dash or an emoji. And
+  `shellenv.augmented_path()` split and joined PATH on `":"`, which on Windows
+  is both the wrong separator and a cut through every `C:\...` entry, so `which`
+  answered None for everything and would have withheld the winget buttons this
+  build adds.
 * **Not verified anywhere yet.** That a WebView2 window renders Jamgraf
   correctly on a real Windows desktop, and whether the 🎤 finds a speech API
-  there. Both need someone at a Windows machine.
+  there. Both need someone at a Windows machine. Wiki rename and delete are
+  expected to fail there until the file-locking limitation above is addressed.
