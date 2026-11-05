@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -195,3 +196,88 @@ def fake_live_http(monkeypatch):
         monkeypatch.setattr(mcp_server.httpx, "Client", _Client)
 
     return install
+
+
+# --- "this OS will not move an open file" ------------------------------------
+#
+# Windows refuses `os.rename` and `os.unlink` on a file any handle in any
+# process still has open (`WinError 32`), while POSIX renames and unlinks the
+# directory entry and lets the handle go on using the inode. That difference is
+# why renaming a wiki worked on macOS and could not work on Windows at all, and
+# why it stayed hidden: every `conn.close()` in `db.py` was raising
+# `AttributeError` into a `suppress(Exception)`, the handles all leaked, and
+# POSIX did not care.
+#
+# A leak POSIX does not care about is one macOS cannot test, so the fixture
+# below makes macOS care: it applies the Windows rule to this process's own
+# handles. It does not emulate Windows — it enforces the one property the fix
+# has to have, which is that nothing of ours is still open when the file moves.
+
+def _open_fd_on(path) -> bool:
+    """Does this process still hold an fd on `path`? Compares (dev, inode).
+
+    By inode rather than by name, because that is what the OS checks and what
+    an fd actually refers to — a handle on `main.db` is a handle on that inode
+    whatever the directory entry has since been called.
+    """
+    import os as _os
+
+    try:
+        want = _os.stat(path)
+    except OSError:
+        return False
+    for entry in _os.listdir("/dev/fd"):
+        try:
+            got = _os.fstat(int(entry))
+        except (OSError, ValueError):
+            continue
+        if (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+            return True
+    return False
+
+
+@pytest.fixture
+def as_if_windows(monkeypatch):
+    """Apply Windows's file rules, and take its branch through `db.file_move`.
+
+    Both halves matter. Flipping `db.OPEN_FILES_CAN_MOVE` alone picks the branch
+    but still runs on an OS that would move the file regardless, so a test would
+    pass with the handles wide open. Refusing the syscall alone would fail
+    whatever the code does. Together they are the Windows job, run on macOS.
+    """
+    import os as _os
+    import platform
+
+    from jamgraf import db
+
+    if platform.system() != "Darwin" and _os.name != "posix":  # pragma: no cover
+        pytest.skip("the /dev/fd check this leans on is POSIX-only")
+
+    monkeypatch.setattr(db, "OPEN_FILES_CAN_MOVE", False)
+
+    real_rename, real_unlink, real_remove = _os.rename, _os.unlink, _os.remove
+
+    def _refuse(verb, path):
+        raise PermissionError(
+            32, f"[as_if_windows] cannot {verb} {Path(path).name}: this process "
+                f"still holds an open handle on it")
+
+    def rename(src, dst, **kw):
+        if _open_fd_on(src):
+            _refuse("rename", src)
+        return real_rename(src, dst, **kw)
+
+    def unlink(path, **kw):
+        if _open_fd_on(path):
+            _refuse("unlink", path)
+        return real_unlink(path, **kw)
+
+    def remove(path, **kw):
+        if _open_fd_on(path):
+            _refuse("remove", path)
+        return real_remove(path, **kw)
+
+    monkeypatch.setattr(_os, "rename", rename)
+    monkeypatch.setattr(_os, "unlink", unlink)
+    monkeypatch.setattr(_os, "remove", remove)
+    yield

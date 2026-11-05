@@ -485,13 +485,27 @@ def test_a_release_that_cannot_save_refuses_rather_than_dropping_the_text(
 
 
 def test_a_write_in_flight_when_the_address_changes_is_not_lost(wiki):
-    """The whole reason the file is renamed rather than copied.
+    """A write through a handle from before the move arrives, or says it didn't.
 
-    A handle another thread cached before the move stays usable until that
-    thread next asks for one. Copy-then-delete sent its next write into the old
-    file and then deleted that file — the write was gone, and nothing anywhere
-    said so. A rename leaves the handle writing to the same inode, which is this
-    wiki under its new address, so the write arrives where it was always going.
+    The whole reason the file is renamed rather than copied. A handle another
+    thread cached before the move stays usable until that thread next asks for
+    one, so the question is where its next write goes. Copy-then-delete sent it
+    into the old file and then deleted that file — the write was gone, and
+    nothing anywhere said so. That is the one outcome ruled out here.
+
+    Which of the two acceptable outcomes you get is a property of the OS, not of
+    this code, and `db.OPEN_FILES_CAN_MOVE` is where that is written down:
+
+    * **POSIX** renames the directory entry, so the handle still refers to the
+      same inode — this wiki under its new address — and the write lands where
+      it was always going. Nothing has to be locked and no save pays for it.
+    * **Windows** will not rename a file while a handle is open at all, so the
+      rename has to close them first (`db.close_wiki_handles`). The write then
+      fails, loudly, on a closed connection. That is a real loss of this
+      platform's and it is recorded in `docs/data-safety.md` question 6 — but it
+      is a *reported* one, and the thread that was mid-save finds out.
+
+    Either way the renamed wiki is intact and nothing was written anywhere else.
 
     Simulated at the handle, because that is where the race lives: a real one
     needs a save committing in the same millisecond as the rename.
@@ -510,19 +524,205 @@ def test_a_write_in_flight_when_the_address_changes_is_not_lost(wiki):
 
         wikis.change_slug("beaconlight", "beaconlight-renamed")
 
-        # That handle is still open, and still pointing at the same inode. A
-        # write through it now is the one the old design threw away.
         def write_through(conn):
             conn.execute(
                 "INSERT INTO pages(slug, title, markdown, html) "
                 "VALUES ('in-flight', 'In Flight', 'written as it moved', '')")
             conn.commit()
 
-        pool.submit(write_through, stale).result()
+        outcome = pool.submit(write_through, stale)
+        refused = outcome.exception()
+
+    if db.OPEN_FILES_CAN_MOVE:
+        assert refused is None, f"the write was refused on POSIX: {refused!r}"
+    else:
+        assert refused is not None, ("the handle was still open across a rename "
+                                     "this OS does not allow")
 
     tok = db.current_wiki.set("beaconlight-renamed")
     try:
-        assert store.get_page("in-flight")["markdown"] == "written as it moved"
-        assert store.get_page("existing")            # and nothing else moved
+        assert store.get_page("existing")            # nothing else moved
+        arrived = store.get_page("in-flight")
+    finally:
+        db.current_wiki.reset(tok)
+    if db.OPEN_FILES_CAN_MOVE:
+        assert arrived["markdown"] == "written as it moved"
+    else:
+        assert arrived is None       # refused above, so it was never written
+
+    # The one outcome that is never acceptable: it went into some other wiki.
+    for other in ("main", "crosslake", "startupos"):
+        tok = db.current_wiki.set(other)
+        try:
+            assert store.get_page("in-flight") is None, f"it landed in {other}"
+        finally:
+            db.current_wiki.reset(tok)
+
+
+# --- An OS that will not move an open file ------------------------------------
+#
+# Windows refuses `os.rename` and `os.unlink` while any handle is open on the
+# file (`WinError 32`), so moving a wiki's database means closing handles other
+# threads own — which the per-thread cache could not do, and which had no
+# coverage because POSIX never needed it. The `as_if_windows` fixture applies
+# that rule here: it takes the Windows branch through `db.file_move` *and* makes
+# this machine's `os.rename`/`os.unlink` refuse a file this process still holds
+# open, so a leaked handle fails the test instead of going unnoticed.
+
+
+def _handle_on(slug: str):
+    """Cache a handle for `slug` on a worker thread, and keep that thread."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=1)
+
+    def cache():
+        db.current_wiki.set(slug)
+        return db.get_conn()
+
+    return pool, pool.submit(cache).result()
+
+
+def test_a_rename_closes_the_handles_another_thread_owns(wiki, as_if_windows):
+    """The failure this is for: six tests, `WinError 32`, nothing renameable.
+
+    A request thread caches a handle and keeps it — that is the whole point of
+    the cache — so by the time anyone renames a wiki there is almost always a
+    handle open in a thread the renaming thread cannot reach. On POSIX that is
+    fine. Here it is the difference between the feature working and not existing.
+    """
+    slug = wikis.create_wiki("Beaconlight Two")
+    _seed(slug, "Kept", "every word survives the move")
+    pool, _held = _handle_on(slug)
+    try:
+        assert wikis.change_slug(slug, "beaconlight-moved") == "beaconlight-moved"
+        assert not wikis.db_path(slug).exists()
+        assert wikis.db_path("beaconlight-moved").exists()
+
+        # And the worker is working again: it reopens under the new address
+        # rather than carrying a closed handle around.
+        def read_back():
+            db.current_wiki.set("beaconlight-moved")
+            return store.get_page("kept")["markdown"]
+
+        assert pool.submit(read_back).result() == "every word survives the move"
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_a_delete_closes_them_too(wiki, as_if_windows):
+    """Unlink is refused for the same reason rename is, and says so."""
+    slug = wikis.create_wiki("Disposable")
+    _seed(slug, "Gone", "not for long")
+    pool, _held = _handle_on(slug)
+    try:
+        assert wikis.delete_wiki(slug) is True
+        for suffix in ("", "-wal", "-shm"):
+            assert not (config.WIKIS_DIR / (slug + ".db" + suffix)).exists()
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_a_save_in_flight_refuses_the_rename_rather_than_being_closed_under(
+        wiki, as_if_windows):
+    """Rule 6's atomic unit outranks the rename, and the refusal says why.
+
+    One page save is one transaction: the projection, the version snapshot, the
+    tags and the canonical Y.Doc land together or not at all. Closing that
+    connection from another thread to free the file would roll the save back
+    with nobody told, and the saving thread's next statement would fail a long
+    way from the cause. So the rename is refused, nothing is closed and nothing
+    is moved — the user tries again a moment later.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    _seed("beaconlight", "Existing", "already here")
+    holding = threading.Event()
+    release = threading.Event()
+
+    def save_slowly():
+        db.current_wiki.set("beaconlight")
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO pages(slug, title, markdown, html) "
+                         "VALUES ('slow', 'Slow', 'mid-save', '')")
+            holding.set()
+            release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        saving = pool.submit(save_slowly)
+        assert holding.wait(10)
+        try:
+            with pytest.raises(db.WikiBusy) as caught:
+                wikis.change_slug("beaconlight", "beaconlight-renamed")
+            assert "save(s) in flight" in str(caught.value)
+            assert "nothing was moved" in str(caught.value)
+        finally:
+            release.set()
+        saving.result()
+
+    # Nothing moved, and the save that was in flight is all there.
+    assert wikis.exists("beaconlight") and not wikis.exists("beaconlight-renamed")
+    assert wikis.db_path("beaconlight").exists()
+    tok = db.current_wiki.set("beaconlight")
+    try:
+        assert store.get_page("slow")["markdown"] == "mid-save"
+        assert store.get_page("existing")
+    finally:
+        db.current_wiki.reset(tok)
+
+
+def test_a_reader_arriving_mid_move_waits_instead_of_creating_an_empty_wiki(wiki):
+    """The window between the close and the registry write, which is the trap.
+
+    For an instant the wiki's file is not where the registry says it is. SQLite
+    creates an empty database for a path that does not exist, so a reader
+    arriving in that instant would have one manufactured at the old address — a
+    rename that silently empties the wiki, which is the worst outcome available
+    here. `db.file_move` holds readers off and they resolve the address again
+    afterwards.
+
+    Not under `as_if_windows`: the window is the same on both, and this is about
+    what a *reader* does, not about what the OS allows.
+    """
+    slug = wikis.create_wiki("Shifting")
+    _seed(slug, "Here", "still here")
+    arrived: dict = {}
+    started = threading.Event()
+
+    def read_while_it_moves():
+        started.set()
+        db.current_wiki.set(slug)
+        try:
+            arrived["pages"] = [p["slug"] for p in store.list_pages()]
+        except Exception as exc:                 # noqa: BLE001 - reported
+            arrived["error"] = f"{type(exc).__name__}: {exc}"
+
+    reader = threading.Thread(target=read_while_it_moves)
+    with db.file_move(slug):
+        reader.start()
+        assert started.wait(10)
+        # It is inside get_conn now, waiting. Move the files under it.
+        for suffix in ("-shm", "-wal", ""):
+            a = config.WIKIS_DIR / (slug + ".db" + suffix)
+            if a.exists():
+                a.rename(config.WIKIS_DIR / ("shifted.db" + suffix))
+        with wikis._lock:
+            reg = wikis._load()
+            for w in reg["wikis"]:
+                if w["slug"] == slug:
+                    w["slug"] = "shifted"
+            wikis._save(reg)
+        # Still nothing created at the address it is waiting on.
+        assert not (config.WIKIS_DIR / (slug + ".db")).exists()
+    reader.join(10)
+
+    assert "error" not in arrived, arrived["error"]
+    # It re-resolved: the old slug is gone, so it fell back to the default wiki
+    # rather than conjuring an empty one of its own at the old address.
+    assert not (config.WIKIS_DIR / (slug + ".db")).exists()
+    assert arrived["pages"] == []
+    tok = db.current_wiki.set("shifted")
+    try:
+        assert store.get_page("here")["markdown"] == "still here"
     finally:
         db.current_wiki.reset(tok)

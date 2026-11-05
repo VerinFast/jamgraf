@@ -1,0 +1,50 @@
+# Windows will not rename or delete a file while a handle is open on it
+# (`WinError 32`); POSIX will. That difference is not a detail here — it is the
+# difference between renaming a wiki working and not existing, and it hid a real
+# handle leak on every backend for as long as the suite only ran on macOS
+# (CLAUDE.md rule 14, `docs/data-safety.md` question 6).
+#
+# The `as_if_windows` fixture makes macOS enforce the Windows rule, so the macOS
+# job already catches a regression here. This job is the other half: proof on the
+# real OS, because a fixture can only test the rule we *believe* Windows has.
+#
+# Deliberately narrow. The rest of the suite carries macOS assumptions (bash
+# release tooling, `.app` bundles, `~/Library` paths) that are being sorted out
+# separately in the Windows front-end work; running them here would make this
+# job red for reasons that have nothing to do with file handles. These two files
+# pass on Windows in full, and must keep doing so.
+name: windows file handles
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-file-handles-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wiki-files:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements-dev.txt
+
+      - name: Rename, delete, and the properties around them
+        env:
+          JAMGRAF_DATA: ${{ runner.temp }}\jamgraf-ci
+          HF_HUB_OFFLINE: '1'
+        run: python -m pytest tests/test_wiki_rename.py tests/test_data_safety.py -q
