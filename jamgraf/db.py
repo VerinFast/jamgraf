@@ -581,9 +581,11 @@ def close_wiki_handles(wiki: str) -> int:
     with nobody told, and the thread's next statement would fail somewhere far
     from the cause. So any wiki with a transaction open is refused, with nothing
     closed and nothing moved; the caller reports it and the user tries again a
-    moment later. The same goes for a handle that will not close: it is named
-    and the move is abandoned, because a move that half happened is worse than
-    one that did not.
+    moment later. A handle that simply **will not** close is reported too, but
+    the shape is different and worth being exact about: the closes that
+    succeeded stay closed (they reopen on next use, which is routine) and the
+    *move* is abandoned, because a move that half happened is worse than one
+    that did not. The reason names the thread that owns the stubborn handle.
 
     It does **not** wait for a transaction to finish. A save takes
     milliseconds, but `after_commit` work can embed, and the honest answer to
@@ -597,8 +599,8 @@ def close_wiki_handles(wiki: str) -> int:
         # this closes handles and it has closed none, so what did not happen is
         # the caller's sentence to write (`wikis.change_slug`, `delete_wiki`).
         plural = "a save is" if len(busy) == 1 else f"{len(busy)} saves are"
-        raise WikiBusy(wiki, f"{plural} in flight on it "
-                             f"(thread {busy[0].owner_thread})")
+        raise WikiBusy(wiki, f"{plural} in flight on it (thread "
+                             f"{getattr(busy[0], 'owner_thread', '?')})")
     try:
         refused = [r for r in (_shut(c, wiki, checkpoint=True) for c in live)
                    if r]
