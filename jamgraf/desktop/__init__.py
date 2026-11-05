@@ -116,13 +116,39 @@ def _menu(base: str):
     ]
 
 
+def _pywebview_installed() -> bool:
+    """Whether the GUI dependency is here, without importing it.
+
+    ``find_spec`` rather than a try/import: importing pywebview starts looking
+    for a GUI toolkit, and this runs on the path where there may not be one.
+    """
+    from importlib.util import find_spec
+
+    try:
+        return find_spec("webview") is not None
+    except Exception:
+        return False
+
+
 def _no_window_reason() -> str | None:
     """Why this machine gets the browser instead of a window, or None.
 
-    Two different answers, deliberately: a platform we have no window for at all,
-    and a platform whose window needs something installed. The second names the
-    thing to install, because it is fixable.
+    Three different answers, deliberately: the GUI dependency is not installed,
+    the platform has no window at all, or its window needs a runtime. Each names
+    the thing to do about it, because each is fixable by a different person doing
+    a different thing.
+
+    The first one exists because `pip install jamgraf` without the extra still
+    puts `jamgraf-app` on the PATH -- console scripts are not conditional on an
+    extra -- so running it was an ImportError traceback. A traceback is not a
+    report (rule 9): it does not name the extra, and it buries the fact that the
+    app would have worked in a browser.
     """
+    if not _pywebview_installed():
+        return ("Jamgraf's own window needs the `desktop` extra, which isn't "
+                "installed: `pip install \"jamgraf[desktop]\"`. Opening in your "
+                "browser instead, which does everything the window does except "
+                "the native Save and Open dialogs.")
     native = native_module()
     if native is None:
         return ("Jamgraf's own window is available on macOS and Windows. On "

@@ -176,3 +176,25 @@ def test_the_connect_page_asks_the_helper_rather_than_hardcoding_a_mac_path(
     assert "AppData" in page.text
     assert "Library/Application Support" not in page.text, \
         "the Connect page tells a Windows reader to edit a macOS path"
+
+
+def test_without_the_desktop_extra_the_window_command_still_works(monkeypatch):
+    """`pip install jamgraf` puts `jamgraf-app` on the PATH whether or not the
+    extra was asked for — console scripts are not conditional on an extra. So
+    running it without pywebview used to be an ImportError traceback, which
+    names neither the extra nor the fact that a browser would have worked.
+    """
+    monkeypatch.setattr(shell, "_pywebview_installed", lambda: False)
+
+    reason = shell._no_window_reason()
+
+    assert reason and "jamgraf[desktop]" in reason
+    assert "browser" in reason
+
+
+def test_with_the_extra_installed_the_window_is_not_refused(monkeypatch):
+    monkeypatch.setattr(shell, "_pywebview_installed", lambda: True)
+    monkeypatch.setattr(shell, "native_module", lambda: macos)
+    monkeypatch.setattr(macos, "runtime_problem", lambda: None)
+
+    assert shell._no_window_reason() is None
