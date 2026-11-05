@@ -99,6 +99,8 @@ _handles_lock = threading.Lock()
 _moving: dict[str, int] = {}
 _moving_cv = threading.Condition()
 _MOVE_WAIT_SECONDS = 10.0
+# How many times a connection may lose the race with a move before we say so.
+_REOPEN_TRIES = 8
 
 
 class WikiMoved(RuntimeError):
@@ -452,8 +454,11 @@ def get_conn():
                 with _handles_lock:
                     _handles.setdefault(wiki, weakref.WeakSet()).add(conn)
         if racing:
+            # A loop and not a recursive call: the next pass waits out the move
+            # at the barrier before it opens anything, so one more move means
+            # one more pass rather than one more stack frame.
             _shut(conn, wiki)
-            return get_conn()
+            return _reopen(wiki)
     # Ensure the schema once per CONNECTION, not once per process. The cache is
     # per (thread, wiki), so a process-wide memo meant any connection opened
     # after the first one skipped setup entirely -- fine while the file stays
@@ -483,6 +488,22 @@ def get_conn():
                   f"re-created empty. Whatever it held is not in it -- restore "
                   f"a backup or re-open a .wiki file.", file=sys.stderr)
     return conn
+
+
+def _reopen(wiki: str):
+    """Ask again for a connection whose open lost a race with a move.
+
+    Bounded, and the bound is the point: each pass blocks at the move barrier
+    first, so the only way round again is another move starting in the gap. A
+    handful of those is contention; a hundred is something wrong, and saying so
+    beats spinning (rule 4 — surface it, never guess).
+    """
+    for _ in range(_REOPEN_TRIES):
+        conn = get_conn()
+        if conn is not None:
+            return conn
+    raise WikiBusy(wiki, f"its files moved {_REOPEN_TRIES} times while this "
+                         f"request was trying to open it")
 
 
 def _epoch_of(wiki: str) -> int:
