@@ -25,6 +25,17 @@ def _client():
     return TestClient(app, client=("127.0.0.1", 1))
 
 
+@pytest.fixture(autouse=True)
+def _a_mac_unless_said_otherwise(pretend_platform):
+    """Most of this file describes a Mac: Homebrew chains, the nvm and agy
+    scripts, macOS Dictation. Left to the real platform those tests passed
+    locally and would fail on the Windows runner — which was reported before
+    that job had ever run. Pinning the default makes each test say which machine
+    it is about, and the ``windows`` fixture below is how the others opt out.
+    """
+    pretend_platform("darwin", capabilities, remedies)
+
+
 def _have(monkeypatch, *tools: str):
     """Pretend exactly `tools` are installed on this machine."""
     present = set(tools)
@@ -510,8 +521,8 @@ def test_a_probe_that_throws_never_takes_the_page_down(wiki, monkeypatch):
 # installs Node outright, would each be a button that fails.
 
 @pytest.fixture
-def windows(monkeypatch):
-    monkeypatch.setattr(capabilities.sys, "platform", "win32")
+def windows(monkeypatch, pretend_platform):
+    pretend_platform("win32", capabilities, remedies)
     return monkeypatch
 
 
@@ -608,3 +619,27 @@ def test_a_pip_install_is_pointed_at_pip_not_at_a_release_build(wiki, monkeypatc
     assert remedy["kind"] == "manual"
     assert "pip install -U jamgraf" in remedy["why"]
     assert "signed release build" not in remedy["why"]
+
+
+@pytest.mark.parametrize("kind,expected,forbidden", [
+    ("package", "pip install -U jamgraf", "signed release build"),
+    ("checkout", "git pull", "pip install -U"),
+    ("unknown", "can't tell", "signed release build"),
+])
+def test_each_install_shape_is_told_its_own_next_step(wiki, monkeypatch, kind,
+                                                      expected, forbidden):
+    """Rule 9 one screen over from `_no_bundle_reason`. That function already
+    refuses to guess for an unrecognised install; this row used to hand every
+    non-package install — `unknown` included — the advice to replace the build
+    with a signed release, which is a guess about how someone installed Jamgraf.
+    """
+    from jamgraf import updater
+
+    monkeypatch.setattr(updater, "install_kind", lambda: kind)
+    monkeypatch.setattr(updater, "can_update",
+                        lambda: (False, "not running from a packaged .app"))
+    _have(monkeypatch)
+    why = _cap("updates")["remedy"]["why"]
+
+    assert expected in why
+    assert forbidden not in why

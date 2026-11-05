@@ -13,6 +13,7 @@ asserts the shape of.
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 
 import pytest
@@ -21,6 +22,8 @@ from jamgraf import config
 from jamgraf.desktop import api as desktop_api
 from jamgraf.desktop import macos, windows
 import jamgraf.desktop as shell
+
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 NATIVE_ONLY = ("start_dictation", "read_clipboard")
 
@@ -138,27 +141,28 @@ def test_the_mcp_server_still_wins_over_any_window(monkeypatch):
 
 # --- Connect Claude, on whichever platform is reading it ----------------------
 
-def test_the_connect_page_names_this_platforms_claude_config(monkeypatch):
+def test_the_connect_page_names_this_platforms_claude_config(monkeypatch,
+                                                              pretend_platform):
     """A wrong path here is worse than no path: someone follows it, finds
     nothing, and writes a second config Claude Desktop will never read.
     """
-    monkeypatch.setattr(config.sys, "platform", "win32")
+    pretend_platform("win32", config)
     monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
     win = config.claude_desktop_config_path()
     assert win.parts[-2:] == ("Claude", "claude_desktop_config.json")
     assert "AppData" in str(win) and "Library" not in str(win)
 
-    monkeypatch.setattr(config.sys, "platform", "darwin")
+    pretend_platform("darwin", config)
     mac = config.claude_desktop_config_path()
     assert "Library/Application Support" in mac.as_posix()
 
-    monkeypatch.setattr(config.sys, "platform", "linux")
+    pretend_platform("linux", config)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     assert ".config" in config.claude_desktop_config_path().as_posix()
 
 
 def test_the_connect_page_asks_the_helper_rather_than_hardcoding_a_mac_path(
-        monkeypatch):
+        monkeypatch, pretend_platform):
     """Asserted with the platform faked to Windows on purpose: on a Mac the
     hardcoded path and the computed one are the same string, so a test that just
     looked for the computed path would pass with the bug still in place.
@@ -167,7 +171,7 @@ def test_the_connect_page_asks_the_helper_rather_than_hardcoding_a_mac_path(
 
     from jamgraf.api import app
 
-    monkeypatch.setattr(config.sys, "platform", "win32")
+    pretend_platform("win32", config)
     monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
 
     page = TestClient(app, client=("127.0.0.1", 1)).get("/connect")
@@ -198,3 +202,111 @@ def test_with_the_extra_installed_the_window_is_not_refused(monkeypatch):
     monkeypatch.setattr(macos, "runtime_problem", lambda: None)
 
     assert shell._no_window_reason() is None
+
+
+# --- Dictation: the page needs to know which shell it is in -------------------
+
+def test_a_shell_with_no_native_dictation_does_not_claim_one(monkeypatch):
+    """`is_desktop` and "has a native dictation route" are different questions,
+    and conflating them is what made the Windows mic a dead button: the page
+    suppressed the web speech API because it was in a desktop, then found no
+    native method to call. The answer comes from the API class that would own
+    the method, so there is one source of truth.
+    """
+    monkeypatch.delenv("JAMGRAF_NATIVE_DICTATION", raising=False)
+    monkeypatch.delenv("WAIKIKI_NATIVE_DICTATION", raising=False)
+
+    assert hasattr(macos.Api, "start_dictation")
+    assert not hasattr(windows.Api, "start_dictation")
+    assert config.native_dictation() is False
+
+    monkeypatch.setenv("JAMGRAF_NATIVE_DICTATION", "1")
+    assert config.native_dictation() is True
+
+
+def test_the_page_is_told_both_flags_separately(monkeypatch):
+    """A Windows window renders `JAMGRAF_DESKTOP = true` with
+    `JAMGRAF_NATIVE_DICTATION = false`, which is the combination that lets the
+    mic use the browser's own speech recognition. Emitting one flag for both
+    states is the bug.
+    """
+    from fastapi.testclient import TestClient
+
+    from jamgraf.api import app
+
+    client = TestClient(app, client=("127.0.0.1", 1))
+
+    monkeypatch.setenv("JAMGRAF_DESKTOP", "1")
+    monkeypatch.delenv("JAMGRAF_NATIVE_DICTATION", raising=False)
+    monkeypatch.delenv("WAIKIKI_NATIVE_DICTATION", raising=False)
+    page = client.get("/wikis").text
+    assert "window.JAMGRAF_DESKTOP = true;" in page
+    assert "window.JAMGRAF_NATIVE_DICTATION = false;" in page
+
+    monkeypatch.setenv("JAMGRAF_NATIVE_DICTATION", "1")
+    page = client.get("/wikis").text
+    assert "window.JAMGRAF_NATIVE_DICTATION = true;" in page
+
+
+def test_the_mic_takes_the_web_route_when_there_is_no_native_one():
+    """The guard itself, read out of the template.
+
+    Not a presence check: it asserts the *old* condition is gone. `!Rec ||
+    isDesktop` returned on every desktop, before the web route could run;
+    restoring it makes this red.
+    """
+    page = (_ROOT / "jamgraf" / "templates" / "base.html").read_text()
+
+    assert "if (nativeDictation || !Rec) return;" in page
+    assert "if (!Rec || isDesktop) return;" not in page, \
+        "the mic suppresses the web speech API on every desktop again"
+    assert "if (nativeDictation && api) {" in page
+
+
+# --- Where a pip install keeps its wikis --------------------------------------
+
+def test_a_pip_install_does_not_write_inside_site_packages(monkeypatch, tmp_path,
+                                                           pretend_platform):
+    """`DATA_DIR.mkdir()` runs at import, so the old default — `ROOT/"data"`,
+    which for a pip install is inside site-packages — was not merely an odd
+    location: a machine-wide install gives a normal user no write permission
+    there, so importing jamgraf raised PermissionError before the app could say
+    anything. And where it *is* writable, `pip install -U` may remove it.
+    """
+    pretend_platform("win32", config)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    site = tmp_path / "lib" / "python3.13" / "site-packages"
+    (site / "jamgraf").mkdir(parents=True)
+    monkeypatch.setattr(config, "ROOT", site)
+
+    assert config._installed_as_package() is True
+    chosen = config._checkout_or_user_data()
+    assert "site-packages" not in str(chosen)
+    assert chosen == config.user_data_dir()
+
+
+def test_a_checkout_keeps_its_own_data_directory(monkeypatch, tmp_path):
+    """A dev copy stays self-contained; that is why this branch existed."""
+    checkout = tmp_path / "jamgraf-checkout"
+    (checkout / "jamgraf").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text("[project]\nname='jamgraf'\n")
+    monkeypatch.setattr(config, "ROOT", checkout)
+
+    assert config._installed_as_package() is False
+    assert config._checkout_or_user_data() == checkout / "data"
+
+
+def test_data_already_inside_the_package_is_still_used(monkeypatch, tmp_path,
+                                                       capsys):
+    """It should not be there, but if it is it holds somebody's wikis, and
+    quietly reading a different directory would look exactly like losing them.
+    So it is used, and the problem is reported instead."""
+    site = tmp_path / "site-packages"
+    (site / "jamgraf").mkdir(parents=True)
+    legacy = site / "data"
+    legacy.mkdir()
+    (legacy / "wikis.json").write_text("{}")
+    monkeypatch.setattr(config, "ROOT", site)
+
+    assert config._checkout_or_user_data() == legacy
+    assert "may remove it" in capsys.readouterr().err

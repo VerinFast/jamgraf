@@ -461,8 +461,9 @@ def _dictation() -> dict:
         return _cap("dictation", "Dictation", powers, DEGRADED,
                     "Jamgraf's own window has no native dictation on this "
                     "platform, so the 🎤 uses the web speech API --- which an "
-                    "embedded WebView2 may not provide. Opening Jamgraf in a "
-                    "browser at the same address always has it.",
+                    "embedded WebView2 may not provide. Where it isn't there, "
+                    "no mic button is drawn rather than a dead one. Opening "
+                    "Jamgraf in a browser at the same address always has it.",
                     backend="browser")
     trusted = _accessibility_trusted()
     remedy = _step("open-accessibility")
@@ -526,15 +527,28 @@ def _updates() -> dict:
         return _cap("updates", "Automatic updates", powers, OK,
                     (f"{waiting} is ready to install." if waiting else
                      "This install can update itself."), where=where)
-    # Rule 9: name the step that is actionable now. A pip install cannot swap
-    # its own bundle and never will, so "replace it with a signed release build"
-    # is not advice there -- `pip install -U` is. Still a manual remedy and not
-    # a button: upgrading someone's Python environment is theirs to run.
-    if updater.install_kind() == "package":
+    # Rule 9: name the step that is actionable now, which is a different step
+    # for each way Jamgraf can arrive. Every one of these is a manual remedy and
+    # not a button: upgrading someone's Python environment or pulling their
+    # checkout is theirs to run.
+    kind = updater.install_kind()
+    if kind == "package":
         detail = ("Nothing to press: Jamgraf is installed here as a Python "
                   "package, so it updates the way you installed it --- "
                   "`pip install -U jamgraf` (or uv/pipx), then start it again. "
                   "Only the signed .app can update itself from inside.")
+    elif kind == "checkout":
+        detail = ("Nothing to press: this is a source checkout, so it updates "
+                  "with `git pull` and whatever your branch is pointing at. "
+                  "Only the signed .app can update itself from inside.")
+    elif kind == "unknown":
+        # The one branch that must not offer a next step. `_no_bundle_reason`
+        # already refuses to guess here, and this row saying "replace it with a
+        # signed release build" would have put the guess back one screen over.
+        detail = ("Nothing to press, and nothing to suggest: Jamgraf can't tell "
+                  "how this copy was installed, so any instruction here would "
+                  "be a guess at a command to run. Whoever set this copy up is "
+                  "who knows how to replace it.")
     else:
         detail = ("Nothing to press: this isn't a missing tool, it is how this "
                   "copy of Jamgraf was built or where it is installed. "

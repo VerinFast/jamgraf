@@ -82,6 +82,17 @@ def _windows() -> bool:
     return sys.platform == "win32"
 
 
+def store_name() -> str:
+    """What to call this machine's credential store, in a sentence to a person.
+
+    Exists because the sign-in path reports failures by name. "Couldn't save
+    your sign-in to the Keychain" on a Windows machine is a message about
+    somebody else's computer: it names a thing the reader does not have, and
+    hides which store actually refused.
+    """
+    return wincreds.NAME if _windows() else "the macOS Keychain"
+
+
 def available() -> bool:
     """True when this machine has a secure store we can use."""
     if _windows():

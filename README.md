@@ -316,10 +316,11 @@ secret, and the callback comes back to Jamgraf's own loopback port. In the
 desktop app it opens in your **web browser** rather than inside Jamgraf's window,
 so you get your usual session, your password manager and whatever second factor
 your organisation uses; the app notices by itself when you're done. The refresh
-token goes in your **Keychain**, never into a wiki file (that file *is* what
-"Save wiki" hands over) and never into a plain config file. Where there's no
-secure store, signing in is switched off and says so rather than falling back to
-writing the token somewhere less safe. The link itself — the address and the
+token goes in your operating system's credential store — the **Keychain** on
+macOS, the **Windows Credential Manager** on Windows — never into a wiki file
+(that file *is* what "Save wiki" hands over) and never into a plain config file.
+Where there's no secure store, signing in is switched off and says so rather than
+falling back to writing the token somewhere less safe. The link itself — the address and the
 remote wiki's name — is recorded outside the wiki too, so it can't travel to
 someone you share the wiki with.
 

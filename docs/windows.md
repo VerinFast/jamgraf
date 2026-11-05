@@ -42,13 +42,24 @@ in the packaged app: `navigator.clipboard.readText()` (⌘V did nothing at all),
 an Edit menu, which WKWebView simply has none of. A WebView2 window withholds
 none of them.
 
-So Windows does not reimplement those. It leaves the methods **off**, and that
-is a design decision with teeth: `base.html` decides whether to take the native
-dictation route by asking whether `window.pywebview.api.start_dictation` exists.
-A stub returning an error would make the page take a native route that cannot
-work; absence makes it use the browser's own, which on Chromium is the route
-that does. `tests/test_desktop_shell.py` fails if either method moves into the
-shared API.
+So Windows does not reimplement those. It leaves the methods **off**, and the
+page is expected to notice: a stub returning an error would make it take a
+native route that cannot work, while absence lets it use the browser's own,
+which on Chromium is the route that does. `tests/test_desktop_shell.py` fails if
+either method moves into the shared API.
+
+**Absence was not enough on its own, and this was wrong when first written.**
+`base.html` did not ask whether `api.start_dictation` existed before suppressing
+the web speech API — it asked whether it was in a desktop at all
+(`if (!Rec || isDesktop) return;`), because on macOS the web object is present
+and non-functional and pywebview injects its api *asynchronously*, so "no native
+method" at load time is indistinguishable from "not injected yet". In a WebView2
+window that combination left the mic doing nothing whatever, and saying nothing
+either. The page now gets two separate facts from the server —
+`JAMGRAF_DESKTOP`, and `JAMGRAF_NATIVE_DICTATION`, which `jamgraf.desktop` sets
+from the API class it actually installed — so a shell with a native route uses
+it and a shell without one falls through to the browser's. One source of truth,
+and no guessing from an object that may not have arrived yet.
 
 ## No WebView2, no window — said out loud
 

@@ -91,11 +91,32 @@ def test_the_item_is_findable_by_a_person_in_credential_manager(creds):
     assert ACCOUNT in target
 
 
-def test_the_blob_is_utf16_as_the_credential_manager_expects(creds):
+def test_the_blob_is_utf8_so_the_size_limit_is_characters_not_half(creds):
+    """UTF-16 is the convention other credential tools use and it was the first
+    thing written here, but it doubles every character of an ASCII token: the
+    2,560-byte store became 1,280 characters, and a real Keycloak refresh token
+    can exceed that. Nothing but Jamgraf reads this item, so the encoding is
+    ours to pick, and UTF-8 is the one that does not halve the capacity.
+    """
     secretstore.set_secret(ACCOUNT, TOKEN)
 
     (item,) = creds.items.values()
-    assert item["blob"] == TOKEN.encode("utf-16-le")
+    assert item["blob"] == TOKEN.encode("utf-8")
+    assert secretstore.get_secret(ACCOUNT) == TOKEN
+
+
+def test_a_long_but_storable_refresh_token_is_not_refused(creds):
+    """The regression this encoding change is about. A 1,300-character token
+    fits the Credential Manager twice over; under UTF-16 it was refused here and
+    the user was told their sign-in could not be saved, for no reason they could
+    act on. Encoding `secret.encode("utf-16-le")` in `wincreds.set` makes this
+    go red.
+    """
+    token = "r" * 1300
+    assert len(token) > wincreds.MAX_BLOB // 2
+
+    assert secretstore.set_secret(ACCOUNT, token) is True
+    assert secretstore.get_secret(ACCOUNT) == token
 
 
 @pytest.mark.parametrize("value", ["tok\nmore", "tok\rmore", "tok\x00more",
@@ -114,7 +135,7 @@ def test_no_control_character_is_stored_on_windows_either(creds, value):
 
 def test_a_credential_too_large_to_store_is_refused_with_a_reason(creds, capsys):
     """Rather than failing inside CredWriteW with a number nobody can act on."""
-    huge = "x" * (wincreds.MAX_BLOB // 2 + 1)
+    huge = "x" * (wincreds.MAX_BLOB + 1)
 
     assert secretstore.set_secret(ACCOUNT, huge) is False
 

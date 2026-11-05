@@ -87,8 +87,14 @@ two in parity (same substance, different voice) whenever you change either.
   WKWebView withholds from the page (Apple Event deep links, Dictation,
   NSPasteboard) and `windows.py` is nearly empty *because* WebView2 is Chromium
   and withholds none of it. A platform with no native route leaves the method
-  **off** rather than stubbing it — `base.html` chooses the native route by
-  asking whether the method exists, so absence is the signal. `jamgraf_app.py`
+  **off** rather than stubbing it. Absence alone is *not* enough for the page to
+  act on, though, and assuming it was is how the Windows mic shipped dead:
+  pywebview injects `window.pywebview.api` asynchronously, so "no
+  `start_dictation`" is indistinguishable from "not injected yet", and
+  `base.html` therefore used to suppress the web speech route on every desktop.
+  The shell states it instead — `JAMGRAF_NATIVE_DICTATION`, set from the API
+  class actually installed, read via `config.native_dictation()` — so the page
+  never guesses from an object that may not have arrived. `jamgraf_app.py`
   (PyInstaller) and the `jamgraf-app` script both land on `desktop.main`.
 - `jamgraf/deeplink.py` — `jamgraf://` deep links: the allow-list that turns an
   external URL into an in-app destination (see `docs/deep-links.md`).

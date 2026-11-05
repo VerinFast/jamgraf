@@ -246,6 +246,16 @@ def main() -> None:
     # because the check ran too early is invisible rather than broken.
     os.environ["JAMGRAF_DESKTOP"] = "1"
 
+    # And tell it whether THIS shell has a native dictation route, which is not
+    # the same question. The page cannot answer it by looking: pywebview injects
+    # its api asynchronously, so "no start_dictation" at load time is
+    # indistinguishable from "not injected yet" -- which is why base.html used
+    # to treat every desktop as having one and suppress the web speech route
+    # outright. On Windows that left the mic doing nothing at all. The class
+    # that owns the method is the only thing that knows, so it answers here.
+    if hasattr(native.Api, "start_dictation"):
+        os.environ["JAMGRAF_NATIVE_DICTATION"] = "1"
+
     import webview
 
     server = _serve(bind_host, port, "warning")

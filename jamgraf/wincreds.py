@@ -49,10 +49,18 @@ CRED_PERSIST_LOCAL_MACHINE = 2
 ERROR_NOT_FOUND = 1168
 
 MAX_BLOB = 2560
-"""``CRED_MAX_CREDENTIAL_BLOB_SIZE``. UTF-16 doubles every character, so this is
-1280 characters of token. A refresh token is nowhere near it; a value that is
-gets refused here with a reason rather than failing inside ``CredWriteW`` with
-an error code nobody can act on."""
+"""``CRED_MAX_CREDENTIAL_BLOB_SIZE``, in bytes.
+
+The blob is written as **UTF-8**, which is what makes that limit 2560 characters
+of token rather than 1280. UTF-16 is the convention other credential tools use,
+and it was the first thing written here, but it doubles every character of an
+ASCII token: a Keycloak refresh token of 1,300 characters would have been
+refused by this module while fitting the store twice over, and the user would
+have been told their sign-in could not be saved for no reason they could act on.
+Nothing but Jamgraf reads this item, so the encoding is ours to choose.
+
+A value that genuinely does not fit is still refused here with a reason, rather
+than failing inside ``CredWriteW`` with an error code nobody can act on."""
 
 _API: object | None = None
 _LOADED = False
@@ -193,7 +201,7 @@ def set(service: str, account: str, secret: str) -> bool:  # noqa: A001
     api = _api()
     if api is None:
         return False
-    blob = secret.encode("utf-16-le")
+    blob = secret.encode("utf-8")
     if len(blob) > MAX_BLOB:
         print(f"[jamgraf] refusing to store a {len(blob)}-byte credential: "
               f"the Credential Manager takes at most {MAX_BLOB}",
@@ -225,7 +233,7 @@ def get(service: str, account: str) -> str | None:
                   f"(Windows error {err})", file=sys.stderr)
         return None
     try:
-        return blob.decode("utf-16-le") or None
+        return blob.decode("utf-8") or None
     except UnicodeDecodeError:
         # Something else wrote this target. Say so: silently treating it as
         # "not signed in" would have us overwrite someone else's item.
@@ -235,9 +243,19 @@ def get(service: str, account: str) -> str | None:
 
 
 def delete(service: str, account: str) -> bool:
-    """Remove the stored secret. True if something was removed."""
+    """Remove the stored secret. True if something was removed.
+
+    A failure that is not "there was nothing there" is **reported**, because of
+    what sits on top of it: signing out calls this and then tells the person
+    they are signed out. If the Credential Manager refused the delete, the
+    refresh token is still on the machine and the next ``signed_in`` check finds
+    it — so the one thing that must not happen is this failing quietly.
+    """
     api = _api()
     if api is None:
         return False
-    ok, _err = api.delete(_target(service, account))
+    ok, err = api.delete(_target(service, account))
+    if not ok and err and err != ERROR_NOT_FOUND:
+        print(f"[jamgraf] could not remove the credential — it is still stored "
+              f"(Windows error {err})", file=sys.stderr)
     return ok
