@@ -794,3 +794,72 @@ def test_a_busy_wiki_comes_back_as_a_message_not_a_500(wiki, as_if_windows):
         assert store.get_page("slow")["markdown"] == "mid-save"
     finally:
         db.current_wiki.reset(tok)
+
+
+def test_a_rename_refused_part_way_puts_every_file_back(wiki, monkeypatch):
+    """The `-shm` moved and the database did not: a wiki with a piece missing.
+
+    Any one of the three renames can be refused — by a scheduled backup holding
+    a handle for the seconds it takes to copy the wiki (`db.backup_db`), or by
+    anything else the OS is unwilling to move. The registry still names the old
+    address, so a file left behind at the new one is not litter: the next open
+    would find a database with no log, or somebody else's.
+
+    Refused on the **second** rename on purpose, because a failure on the first
+    has nothing to undo and proves nothing. Getting a second file to move at all
+    takes a handle held elsewhere — closing the last connection to a WAL
+    database makes SQLite delete the `-wal` and `-shm`, so a wiki whose handles
+    all closed has only its `.db` left to rename.
+    """
+    from pathlib import Path as _Path
+
+    slug = wikis.create_wiki("Interrupted")
+    _seed(slug, "Kept", "must survive a failed rename")
+    pool, _held = _handle_on(slug)            # keeps the -wal/-shm in existence
+    try:
+        before = sorted(p.name for p in config.WIKIS_DIR.iterdir())
+        assert f"{slug}.db-wal" in before, "nothing to interrupt part-way"
+
+        real = _Path.rename
+        calls = {"n": 0}
+
+        def flaky(self, target):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise PermissionError(32, "The process cannot access the file "
+                                          "because it is being used by another "
+                                          "process")
+            return real(self, target)
+
+        # A nested context, not `monkeypatch.undo()`: `monkeypatch` is one
+        # function-scoped object shared with the `wiki` fixture, so undoing
+        # everything on it would put `config.DATA_DIR` back to the developer's
+        # real data directory half-way through the test.
+        with monkeypatch.context() as m:
+            m.setattr(_Path, "rename", flaky)
+            with pytest.raises(ValueError) as caught:
+                wikis.change_slug(slug, "interrupted-moved")
+
+        said = str(caught.value)
+        assert "could not be moved" in said
+        assert f"/{slug}" in said            # it says where the wiki still is
+        assert isinstance(caught.value.__cause__, PermissionError)
+
+        # Everything is back under the name the registry still holds, and
+        # nothing is sitting at the address the wiki never got to.
+        assert wikis.exists(slug) and not wikis.exists("interrupted-moved")
+        assert sorted(p.name for p in config.WIKIS_DIR.iterdir()) == before
+        assert not list(config.WIKIS_DIR.glob("interrupted-moved.db*"))
+
+        # And it still opens, with its content.
+        tok = db.current_wiki.set(slug)
+        try:
+            assert store.get_page("kept")["markdown"] == (
+                "must survive a failed rename")
+        finally:
+            db.current_wiki.reset(tok)
+
+        # Renaming again, with nothing in the way, just works.
+        assert wikis.change_slug(slug, "interrupted-moved") == "interrupted-moved"
+    finally:
+        pool.shutdown(wait=True)

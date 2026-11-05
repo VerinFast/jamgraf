@@ -221,19 +221,27 @@ def change_slug(slug: str, new_slug: str) -> str:
     # way out. It refuses with `db.WikiBusy` — nothing closed, nothing moved —
     # if a save is in flight. How many handles it has to close is a property of
     # the platform, not of this function: see `db.OPEN_FILES_CAN_MOVE`.
+    moved: list[tuple[Path, Path]] = []
     try:
         with db.file_move(slug):
-            moved: list[tuple[Path, Path]] = []
-            # Sidecars before the database. Nothing can open the new name until
-            # the registry names it, below, but the ordering costs nothing and
-            # means there is never an instant where a database is visible
-            # without its log.
-            for suffix in ("-shm", "-wal", ""):
-                a, b = Path(str(src) + suffix), Path(str(dest) + suffix)
-                if a.exists():
-                    a.rename(b)
-                    moved.append((a, b))
             try:
+                # Sidecars before the database. Nothing can open the new name
+                # until the registry names it, below, but the ordering costs
+                # nothing and means there is never an instant where a database
+                # is visible without its log.
+                #
+                # The renames are inside the same `try` as the registry write
+                # for a reason the OS supplies: any one of them can fail, and on
+                # Windows that is a thing that actually happens — a scheduled
+                # backup holds a handle on this wiki for the seconds it takes to
+                # copy, and a rename landing in that window is refused. Rolling
+                # back only the registry would have left a wiki whose `-shm` had
+                # moved and whose database had not.
+                for suffix in ("-shm", "-wal", ""):
+                    a, b = Path(str(src) + suffix), Path(str(dest) + suffix)
+                    if a.exists():
+                        a.rename(b)
+                        moved.append((a, b))
                 with _lock:
                     reg = _load()
                     for w in reg["wikis"]:
@@ -243,8 +251,7 @@ def change_slug(slug: str, new_slug: str) -> str:
                         reg["default"] = target
                     _save(reg)
             except Exception:
-                for a, b in reversed(moved):
-                    b.rename(a)            # the registry still names the old one
+                _put_back(moved)           # the registry still names the old one
                 raise
     except db.WikiBusy as exc:
         # Every other refusal this function can make is a ValueError the routes
@@ -255,7 +262,36 @@ def change_slug(slug: str, new_slug: str) -> str:
         raise ValueError(
             f"'{name_of(slug)}' is being written to right now — {exc.reason}. "
             f"Nothing was moved; try again in a moment.") from exc
+    except OSError as exc:
+        # The OS refused one of the renames. Everything is back where it was
+        # (`_put_back` says so, or raises), so this is a refusal like any other.
+        raise ValueError(
+            f"'{name_of(slug)}' could not be moved: {exc.strerror or exc}. "
+            f"It is still at /{slug} with everything in it; try again in a "
+            f"moment.") from exc
     return target
+
+
+def _put_back(moved: list[tuple[Path, Path]]) -> None:
+    """Undo the renames in `moved`, newest first. Raises if any will not go back.
+
+    The registry still names the old address, so a file left at the new one is
+    not litter — it is a wiki with a piece missing. If a file cannot be put
+    back, say which: that is a state only a person can sort out, and silence
+    would leave them with a wiki that opens empty and no idea why.
+    """
+    stuck = []
+    for a, b in reversed(moved):
+        try:
+            b.rename(a)
+        except OSError:
+            stuck.append(b.name)
+    if stuck:
+        raise ValueError(
+            f"a rename failed part-way and {', '.join(stuck)} could not be put "
+            f"back. Nothing is lost, but this wiki's files are split across two "
+            f"names: close Jamgraf and rename them to match before opening it "
+            f"again.")
 
 
 def delete_wiki(slug: str) -> bool:

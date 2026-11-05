@@ -601,6 +601,21 @@ knows SQLite (rule 2) — `wikis.py` just wraps its file operations in
   outcome available here. `db.file_move` holds those readers for the few
   milliseconds the move takes, and they resolve the address again afterwards.
 
+A rename can also be refused **part-way**, which is new ground: three files
+move one at a time, and a scheduled backup holds a handle on a wiki for the
+seconds it takes to copy it (`db.backup_db`), so on Windows a rename landing in
+that window is refused after the first file has already gone. The registry still
+names the old address, so a file left at the new one is not litter — it is a wiki
+with a piece missing, and the next open finds a database with no log or with
+somebody else's. The renames now sit inside the same rollback as the registry
+write, and a file that cannot be put back is **named** rather than left for the
+user to discover. `test_a_rename_refused_part_way_puts_every_file_back` holds it.
+
+(Closing the last connection to a WAL database makes SQLite delete the `-wal`
+and `-shm`, so once the handles really close there is usually only the `.db`
+left to rename. The partial case is reachable where a handle is deliberately
+kept — which is the POSIX branch below.)
+
 On POSIX only this thread's handle is closed, as before. A stale handle in
 another thread follows the renamed file, so the write it is carrying arrives in
 the right wiki — strictly better than losing it, so it is left alone. A
