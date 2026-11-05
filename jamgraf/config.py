@@ -271,6 +271,24 @@ RAG_TOP_K = 6
 RRF_K = 60  # reciprocal-rank-fusion constant
 
 
+def claude_desktop_config_path() -> Path:
+    """Where Claude Desktop keeps the file the Connect page tells you to edit.
+
+    Three different places, and the page is useless if it names the wrong one:
+    someone follows it, finds nothing there, and creates a second config the app
+    will never read. Here rather than in the route because it is a fact about
+    this platform, which is what this module is for.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA")
+                    or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "Claude" / "claude_desktop_config.json"
+
+
 def mcp_server_config(web_url: str | None = None) -> dict:
     """The MCP server definition for *this* install, ready to hand to a client.
 

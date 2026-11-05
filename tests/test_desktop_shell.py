@@ -134,3 +134,45 @@ def test_the_mcp_server_still_wins_over_any_window(monkeypatch):
 
     shell.main()
     assert called == ["mcp"]
+
+
+# --- Connect Claude, on whichever platform is reading it ----------------------
+
+def test_the_connect_page_names_this_platforms_claude_config(monkeypatch):
+    """A wrong path here is worse than no path: someone follows it, finds
+    nothing, and writes a second config Claude Desktop will never read.
+    """
+    monkeypatch.setattr(config.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
+    win = config.claude_desktop_config_path()
+    assert win.parts[-2:] == ("Claude", "claude_desktop_config.json")
+    assert "AppData" in str(win) and "Library" not in str(win)
+
+    monkeypatch.setattr(config.sys, "platform", "darwin")
+    mac = config.claude_desktop_config_path()
+    assert "Library/Application Support" in mac.as_posix()
+
+    monkeypatch.setattr(config.sys, "platform", "linux")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert ".config" in config.claude_desktop_config_path().as_posix()
+
+
+def test_the_connect_page_asks_the_helper_rather_than_hardcoding_a_mac_path(
+        monkeypatch):
+    """Asserted with the platform faked to Windows on purpose: on a Mac the
+    hardcoded path and the computed one are the same string, so a test that just
+    looked for the computed path would pass with the bug still in place.
+    """
+    from fastapi.testclient import TestClient
+
+    from jamgraf.api import app
+
+    monkeypatch.setattr(config.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
+
+    page = TestClient(app, client=("127.0.0.1", 1)).get("/connect")
+
+    assert page.status_code == 200
+    assert "AppData" in page.text
+    assert "Library/Application Support" not in page.text, \
+        "the Connect page tells a Windows reader to edit a macOS path"

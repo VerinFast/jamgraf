@@ -675,8 +675,7 @@ def connect_page(request: Request):
     return templates.TemplateResponse(request, "help.html", _ctx(
         request,
         claude_config=json.dumps(_claude_config(request), indent=2),
-        config_path=str(Path.home() / "Library" / "Application Support" /
-                        "Claude" / "claude_desktop_config.json"),
+        config_path=str(config.claude_desktop_config_path()),
         web_url=f"{request.url.scheme}://{request.url.netloc}",
     ))
 

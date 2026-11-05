@@ -30,7 +30,11 @@ Which becomes four properties, each guarded by
    Offering *"install the Claude Code CLI"* on a machine without `npm` is the
    same dead end one step later, so the offer resolves to whatever is actionable
    **now**: no npm makes the button Node.js; no Homebrew either makes it
-   instructions with a link, and no button at all.
+   instructions with a link, and no button at all. "Now" includes *this
+   platform*: the package manager is Homebrew on macOS and winget on Windows,
+   using winget's own published identifiers rather than a guess at what a
+   package might be called. The `curl | bash` step below has no Windows
+   counterpart — winget installs Node outright, so nothing needs rescuing.
 4. **Honest when we can't.** Where no vendor publishes an install path, the row
    says the capability needs manual setup and points at the setting that changes
    it. A greyed-out button with instructions beats a fabricated command.
@@ -45,9 +49,10 @@ Which becomes four properties, each guarded by
 | Image generation | the configured image CLI, or Doorman | see below |
 | Read aloud | nothing — the browser always can | none needed |
 | Dictation | browser speech, or macOS Accessibility in the app | open the settings pane |
+| Dictation, in the app window on Windows | web speech, which an embedded WebView2 may not provide | none — names the browser |
 | Doorman | — | **none, deliberately** |
-| Automatic updates | a packaged, writable, signed-key build | manual |
-| Temporary public link | `cloudflared` | `brew install` (chain) |
+| Automatic updates | a packaged, writable, signed-key build | manual (pip, or git, by install kind) |
+| Temporary public link | `cloudflared` | `brew install` / `winget install` (chain) |
 | Semantic search | sqlite-vec, which ships inside Jamgraf | none possible |
 
 Drafting is deliberately *not* Doorman-aware: `authoring.draft` has no Doorman

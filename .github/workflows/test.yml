@@ -5,6 +5,13 @@
 # macOS, not Linux: this ships as a macOS .app, and the dependencies that are
 # most likely to break — apsw, sqlite-vec, onnxruntime — are the ones whose
 # wheels differ by platform. Testing on the platform we ship is the point.
+#
+# And Windows, for the same reason now that `pip install jamgraf[desktop]` gives
+# a window there. This job is not symmetry: it is the *only* thing that executes
+# the Windows credential store's ctypes marshalling and the WebView2 registry
+# walk (jamgraf/wincreds.py, jamgraf/desktop/windows.py), neither of which can
+# run on a Mac. Everything above those seams is tested on every platform; below
+# them, this job is the whole of the coverage.
 name: tests
 
 on:
@@ -44,6 +51,39 @@ jobs:
           JAMGRAF_DATA: ${{ runner.temp }}/jamgraf-ci
           HF_HUB_OFFLINE: '1'
         run: python3 -m pytest -q
+
+  pytest-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements-dev.txt
+
+      - name: Run the suite
+        env:
+          JAMGRAF_DATA: ${{ runner.temp }}\jamgraf-ci
+          HF_HUB_OFFLINE: '1'
+        run: python -m pytest -q
+
+      # pywebview is not in requirements.txt (the pip install must stay
+      # installable on a headless box), so the extra is installed here to prove
+      # the one thing a Windows user does first: that `jamgraf[desktop]`
+      # resolves and the window's entry point imports. Importing is as far as
+      # this goes — a runner has no interactive desktop to open a window on.
+      - name: The desktop extra resolves and imports
+        run: |
+          python -m pip install -q pywebview
+          python -c "from jamgraf.desktop import main; from jamgraf.desktop import windows; print('webview2:', windows.webview2_version()); print(windows.runtime_problem() or 'window available')"
 
   # Guards the rule tests can't: no raw SQL or cursor use in the routes. It has a
   # test of its own, but a fast explicit signal is worth the twenty seconds.

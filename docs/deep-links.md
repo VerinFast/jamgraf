@@ -111,3 +111,12 @@ missing pyobjc symbol must never stop the app from launching.
   to someone else it opens *their* wiki of that name, or fails. These are local
   links, not shareable URLs — that's a job for the LAN/tunnel sharing in
   Settings.
+- **macOS only, and reported as such.** The scheme needs an owner the OS can
+  route to: an `Info.plist` in a packaged `.app`. On Windows that would be a key
+  under `HKCU\Software\Classes` naming an executable, and a `pip install`'s
+  launcher sits inside whichever virtualenv it landed in — so the path we would
+  register goes stale the moment that moves, and claiming a URL scheme in
+  someone's registry is more than a `pip install` was asked to do.
+  `jamgraf/desktop/windows.py` therefore installs nothing and says so, rather
+  than registering a handler that would one day open the wrong thing or nothing
+  at all. See `docs/windows.md`.

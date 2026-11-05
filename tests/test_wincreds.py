@@ -12,6 +12,8 @@ cover it.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from jamgraf import secretstore, wincreds
@@ -158,3 +160,44 @@ def test_without_advapi32_there_is_no_file_to_fall_back_to(monkeypatch):
         assert secretstore.get_secret(ACCOUNT) is None
     finally:
         wincreds._reset_for_tests()
+
+
+# --- On Windows only: the part no Mac can check -------------------------------
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs the real advapi32")
+def test_a_real_credential_round_trips_through_advapi32():
+    """The ctypes seam itself: struct layout, blob pointer, CredFree.
+
+    Everything above ``wincreds._load`` is tested with a fake on every platform.
+    This is the only test that runs the marshalling, which is why it exists and
+    why it is skipped everywhere else. If the credential store is unreachable on
+    this runner, say so and skip rather than fail: that is an environment fact,
+    not a defect in the code under test.
+    """
+    account = "jamgraf-selftest:round-trip"
+    token = "a-token-with a space and a \" quote"
+    if not wincreds.available():
+        pytest.skip("no Credential Manager on this runner")
+
+    try:
+        assert wincreds.set(secretstore.SERVICE, account, token) is True, \
+            "CredWriteW refused a credential this user should be able to write"
+        assert wincreds.get(secretstore.SERVICE, account) == token
+    finally:
+        wincreds.delete(secretstore.SERVICE, account)
+
+    assert wincreds.get(secretstore.SERVICE, account) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs the real registry")
+def test_the_webview2_probe_answers_without_raising():
+    """The registry walk. A runner may or may not have the runtime installed, so
+    what is asserted is the contract -- a version string or None, never an
+    exception out of a probe -- not which answer this machine gives.
+    """
+    from jamgraf.desktop import windows as win_shell
+
+    version = win_shell.webview2_version()
+    assert version is None or (isinstance(version, str) and version[0].isdigit())
+    problem = win_shell.runtime_problem()
+    assert (problem is None) == (version is not None)
