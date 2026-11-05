@@ -175,8 +175,16 @@ def available() -> bool:
 
 
 def unavailable_reason() -> str:
-    if available():
-        return ""
+    """Why there is no usable store here, for a caller that has decided there
+    isn't one.
+
+    Deliberately *not* gated on :func:`available`. ``secretstore`` already
+    answers "is there a store" and only asks this when the answer was no --- and
+    on a real Windows machine advapi32 is always reachable, so a second probe
+    here returned the empty string and the sign-in page refused with no reason
+    at all. The macOS branch next door has always worked this way; this one
+    re-asked a question it had already been given the answer to.
+    """
     return ("This build has no secure place to keep a sign-in token. Jamgraf "
             "uses the Windows Credential Manager, which this machine would not "
             "let it reach.")

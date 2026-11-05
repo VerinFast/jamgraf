@@ -18,7 +18,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def _requirements() -> list[str]:
     out = []
-    for line in (_ROOT / "requirements.txt").read_text().splitlines():
+    for line in (_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if line and not line.startswith("-"):
             out.append(line)
@@ -26,7 +26,7 @@ def _requirements() -> list[str]:
 
 
 def _pyproject() -> list[str]:
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return sorted(data["project"]["dependencies"])
 
 
@@ -42,7 +42,7 @@ def test_the_packaged_version_matches_the_app_version():
     """A wheel that says 1.0.2 while the app says 1.0.3 is a support nightmare."""
     import jamgraf
 
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["version"] == jamgraf.__version__
 
 
@@ -70,7 +70,7 @@ def _dialog_filters() -> list[str]:
     Parsed, not imported: the shell imports `webview` at call time, and the
     suite must not start a server or a window.
     """
-    tree = ast.parse((_ROOT / "jamgraf" / "desktop" / "api.py").read_text())
+    tree = ast.parse((_ROOT / "jamgraf" / "desktop" / "api.py").read_text(encoding="utf-8"))
     found: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):

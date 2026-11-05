@@ -324,7 +324,7 @@ def test_the_backup_stays_on_the_bundles_own_volume(signing_key, wiki, tmp_path,
     res = updater.apply_update(staged)
     assert res["ok"], res
 
-    script = (updater._updates_dir() / "swap.sh").read_text()
+    script = (updater._updates_dir() / "swap.sh").read_text(encoding="utf-8")
     bak_line = next(ln for ln in script.splitlines() if ln.startswith("BAK="))
     assert str(target.parent) in bak_line, \
         f"backup is not beside the bundle: {bak_line}"

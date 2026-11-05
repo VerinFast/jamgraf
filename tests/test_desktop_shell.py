@@ -255,7 +255,7 @@ def test_the_mic_takes_the_web_route_when_there_is_no_native_one():
     isDesktop` returned on every desktop, before the web route could run;
     restoring it makes this red.
     """
-    page = (_ROOT / "jamgraf" / "templates" / "base.html").read_text()
+    page = (_ROOT / "jamgraf" / "templates" / "base.html").read_text(encoding="utf-8")
 
     assert "if (nativeDictation || !Rec) return;" in page
     assert "if (!Rec || isDesktop) return;" not in page, \

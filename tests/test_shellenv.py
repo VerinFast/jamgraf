@@ -70,6 +70,9 @@ def test_no_login_shell_is_interrogated_on_windows(windows, monkeypatch):
     assert "/usr/local/bin" not in built
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="these directories are POSIX install locations, and "
+                           "the fix under test is that Windows does not get them")
 def test_the_posix_path_still_gets_its_extra_directories(monkeypatch):
     """The macOS behaviour this module was written for is unchanged: a
     Finder-launched app needs these appended even when the shell probe fails."""

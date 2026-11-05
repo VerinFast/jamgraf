@@ -130,7 +130,6 @@ jobs:
   pytest-windows-survey:
     runs-on: windows-latest
     timeout-minutes: 25
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -141,7 +140,12 @@ jobs:
       - run: |
           python -m pip install -q --upgrade pip
           python -m pip install -q -r requirements-dev.txt
+      # continue-on-error on the STEP, not the job: a job-level flag still
+      # reports the check as failed, which puts a red mark on the PR for
+      # something that is informational by design. This way the job is green,
+      # the step shows what failed, and nothing claims the suite passes.
       - name: Survey the whole suite on Windows
+        continue-on-error: true
         env:
           JAMGRAF_DATA: ${{ runner.temp }}\jamgraf-survey
           HF_HUB_OFFLINE: '1'

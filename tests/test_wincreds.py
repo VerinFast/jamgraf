@@ -222,3 +222,21 @@ def test_the_webview2_probe_answers_without_raising():
     assert version is None or (isinstance(version, str) and version[0].isdigit())
     problem = win_shell.runtime_problem()
     assert (problem is None) == (version is not None)
+
+
+def test_the_refusal_says_why_even_where_the_store_itself_works(creds, monkeypatch):
+    """``secretstore`` decides *whether* there is a usable store; this module
+    only has to say *why* there isn't when it has already decided there isn't.
+
+    Re-probing here was wrong in the one place it mattered: on a real Windows
+    machine advapi32 always answers, so the second probe said "the store works"
+    and returned the empty string — and the sign-in page refused with no reason
+    printed at all. Restoring `if available(): return ""` to
+    `wincreds.unavailable_reason` makes this go red.
+    """
+    monkeypatch.setattr(secretstore, "available", lambda: False)
+
+    why = secretstore.unavailable_reason()
+
+    assert why, "refused the sign-in without saying why"
+    assert "Credential Manager" in why

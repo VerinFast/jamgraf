@@ -87,15 +87,15 @@ def test_export_import_export_is_a_fixed_point(wiki, tmp_path):
     assert sorted(p.name for p in second.iterdir()) == \
         sorted(p.name for p in first.iterdir())
     for f in sorted(first.iterdir()):
-        assert (second / f.name).read_text() == f.read_text(), f.name
+        assert (second / f.name).read_text(encoding="utf-8") == f.read_text(encoding="utf-8"), f.name
 
 
 def test_structural_keys_do_not_become_page_properties(wiki, tmp_path):
     """`title:`/`parent:` are columns; left in the text they'd be infobox rows."""
     _populate()
     docs = _export(tmp_path)
-    assert "title: Navigation" in (docs / "navigation.md").read_text()
-    assert "parent: navigation" in (docs / "star-compass.md").read_text()
+    assert "title: Navigation" in (docs / "navigation.md").read_text(encoding="utf-8")
+    assert "parent: navigation" in (docs / "star-compass.md").read_text(encoding="utf-8")
 
     wikis.import_markdown(str(docs), name="Clean")
     db.current_wiki.set("clean")
