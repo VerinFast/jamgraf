@@ -489,7 +489,7 @@ def _epoch_of(wiki: str) -> int:
     return _cache_epoch.get(wiki, 0)
 
 
-def invalidate_connections(wiki: Optional[str] = None) -> None:
+def invalidate_connections(wiki: str) -> None:
     """Retire `wiki`'s cached handles in every thread, at their next use.
 
     For a wiki whose file has moved. A handle still open in another thread is
@@ -499,14 +499,11 @@ def invalidate_connections(wiki: Optional[str] = None) -> None:
     registered again — so each thread drops its own the next time it asks, by
     comparing the epoch its handle was opened in against this one.
 
-    One wiki, because a move is a fact about one wiki and a save in flight on
-    another must not be disturbed by it. `None` retires everything, which is
-    what the whole-process cases (a data directory moving under a test) want.
+    One wiki, and the argument is required for that reason: a move is a fact
+    about one wiki, and a save in flight on another must not be disturbed by it.
     """
     with _handles_lock:
-        for w in ([wiki] if wiki is not None else list(_cache_epoch)
-                  + list(_handles)):
-            _cache_epoch[w] = _cache_epoch.get(w, 0) + 1
+        _cache_epoch[wiki] = _cache_epoch.get(wiki, 0) + 1
 
 
 def _shut(conn, wiki: str, checkpoint: bool = False) -> Optional[str]:

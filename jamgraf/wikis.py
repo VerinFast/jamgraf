@@ -180,17 +180,19 @@ def change_slug(slug: str, new_slug: str) -> str:
     touch, so a renamed wiki still pushes and pulls where it always did.
 
     Four things have to happen together, and the order is the whole job.
-    **This thread's handle is checkpointed and closed first**, so the `-wal`
-    can be dropped rather than left beside a file that no longer matches it.
-    **The file moves before the registry does**, because a registry that names
-    a file which is not there yet would have the next reader create an empty
-    one in its place (`db.get_conn`) — a rename that silently empties the wiki
-    is the worst outcome available here, so a failure to record the move puts
-    the file back instead. **Every cached handle is retired**
-    (`db.invalidate_connections`): they are per (thread, wiki) and a stale one
-    follows the renamed file, so writes for the old name would land in the
-    renamed wiki. And **the caller releases the CRDT rooms first** — see
-    `collab.release_wiki`, which cannot be done from here because it is async.
+    **The handles that have to close are closed first** — always this thread's,
+    so the `-wal` is checkpointed rather than left beside a file that no longer
+    matches it, and every other thread's where the OS will not move an open
+    file. **The file moves before the registry does**, because a registry that
+    names a file which is not there yet would have the next reader create an
+    empty one in its place (`db.get_conn`) — a rename that silently empties the
+    wiki is the worst outcome available here, so a failure to record the move
+    puts the file back instead. **Every cached handle is retired** and any left
+    open is re-filed under the new slug: they are per (thread, wiki) and a stale
+    one follows the renamed file, so writes for the old name would land in the
+    renamed wiki. All three are `db.file_move`'s, not this function's. And **the
+    caller releases the CRDT rooms first** — see `collab.release_wiki`, which
+    cannot be done from here because it is async.
 
     Refused before anything moves, and before the caller takes the editors
     down: see `plan_slug_change`.
