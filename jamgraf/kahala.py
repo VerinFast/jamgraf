@@ -155,6 +155,10 @@ def status(slug: str) -> dict:
         "can_sign_in": can,
         "reason": why,
         "secure_store": secretstore.available(),
+        # Named, not assumed: this pane used to tell every reader the token was
+        # in "your Keychain", which on Windows names something they do not have
+        # and hides the store that actually holds it.
+        "store_name": secretstore.store_name(),
         # WHICH Kahala the sign-in is for. "Signed in." on its own is a claim
         # the reader cannot check, and there is more than one Kahala — so name
         # the realm, and let the pane say that one sign-in covers the install.

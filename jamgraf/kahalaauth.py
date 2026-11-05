@@ -224,9 +224,10 @@ def complete(code: str, state: str) -> dict:
                          "to stay signed in with."}
     if not secretstore.set_secret(_account(), refresh):
         return {"ok": False, "next": flow["next"],
-                "error": "Signed in, but the token could not be saved to the "
-                         "Keychain — so it was discarded rather than written "
-                         "somewhere less safe. Nothing was stored."}
+                "error": f"Signed in, but the token could not be saved to "
+                         f"{secretstore.store_name()} — so it was discarded "
+                         f"rather than written somewhere less safe. Nothing was "
+                         f"stored."}
     _remember_access(data)
     return {"ok": True, "error": "", "next": flow["next"]}
 

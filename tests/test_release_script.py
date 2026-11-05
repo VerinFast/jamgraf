@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 REPO = Path(__file__).resolve().parent.parent
 VERSION = re.search(r'__version__ = "([^"]+)"',
-                    (REPO / "jamgraf" / "__init__.py").read_text()).group(1)
+                    (REPO / "jamgraf" / "__init__.py").read_text(encoding="utf-8")).group(1)
 
 
 def _keypair() -> tuple[str, str]:
@@ -78,7 +78,7 @@ class Sandbox:
     def pin(self, *pub_hex: str) -> None:
         """Compile these public keys into the sandbox's updater, as a build would."""
         updater = self.root / "jamgraf" / "updater.py"
-        text = updater.read_text()
+        text = updater.read_text(encoding="utf-8")
         pinned = "".join(f'    "{k}",\n' for k in pub_hex)
         text, n = re.subn(r"PUBLIC_KEYS_HEX: tuple\[str, \.\.\.\] = \(\n.*?\)",
                           f"PUBLIC_KEYS_HEX: tuple[str, ...] = (\n{pinned})",
@@ -91,7 +91,7 @@ class Sandbox:
 
     @property
     def gcloud_calls(self) -> list[str]:
-        return self.log.read_text().splitlines() if self.log.exists() else []
+        return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
     def run(self, *args: str, path: str | None = None, shell: tuple = ("bash",),
             **env) -> subprocess.CompletedProcess:
@@ -349,7 +349,7 @@ def test_a_caller_exported_variable_cannot_carry_the_key_onward(good):
                  JAMGRAF_UPDATE_KEY_PEM="also-exported-by-the-caller")
 
     assert r.returncode == 0, r.stderr
-    envs = [p.read_text() for p in dumps.iterdir()]
+    envs = [p.read_text(encoding="utf-8") for p in dumps.iterdir()]
     assert envs, "the spy never ran"
     line = _key_line(good.pem)
     carriers = [e for e in envs if line in e]
@@ -426,6 +426,6 @@ def test_a_caller_exported_old_key_variable_is_scrubbed_too(good):
                  WAIKIKI_UPDATE_KEY_PEM="old-name-exported-by-the-caller")
 
     assert r.returncode == 0, r.stderr
-    envs = [p.read_text() for p in dumps.iterdir()]
+    envs = [p.read_text(encoding="utf-8") for p in dumps.iterdir()]
     assert envs
     assert not any("old-name-exported-by-the-caller" in e for e in envs)

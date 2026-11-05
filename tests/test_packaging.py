@@ -18,7 +18,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def _requirements() -> list[str]:
     out = []
-    for line in (_ROOT / "requirements.txt").read_text().splitlines():
+    for line in (_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if line and not line.startswith("-"):
             out.append(line)
@@ -26,7 +26,7 @@ def _requirements() -> list[str]:
 
 
 def _pyproject() -> list[str]:
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return sorted(data["project"]["dependencies"])
 
 
@@ -42,7 +42,7 @@ def test_the_packaged_version_matches_the_app_version():
     """A wheel that says 1.0.2 while the app says 1.0.3 is a support nightmare."""
     import jamgraf
 
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["version"] == jamgraf.__version__
 
 
@@ -67,10 +67,10 @@ _PYWEBVIEW_FILTER = re.compile(r'^([\w ]+)\((\*(?:\.(?:\w+|\*))*(?:;\*(?:\.(?:\w
 def _dialog_filters() -> list[str]:
     """Every file-dialog filter the desktop shell declares.
 
-    Parsed, not imported: `jamgraf_app.py` imports `webview` at call time but
-    starts a server at module scope, and the suite must not run either.
+    Parsed, not imported: the shell imports `webview` at call time, and the
+    suite must not start a server or a window.
     """
-    tree = ast.parse((_ROOT / "jamgraf_app.py").read_text())
+    tree = ast.parse((_ROOT / "jamgraf" / "desktop" / "api.py").read_text(encoding="utf-8"))
     found: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -88,7 +88,8 @@ def test_every_file_dialog_filter_is_one_pywebview_accepts():
     """A filter pywebview rejects is a button that silently does nothing."""
     filters = _dialog_filters()
     assert filters, (
-        "no *FILE_TYPES tuple found in jamgraf_app.py — if the dialog filters "
+        "no *FILE_TYPES tuple found in jamgraf/desktop/api.py — if the dialog "
+        "filters "
         "moved or were inlined again, point this test at them rather than "
         "deleting it; an unchecked filter is a dead Open button")
     for f in filters:

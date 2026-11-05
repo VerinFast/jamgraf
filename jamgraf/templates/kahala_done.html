@@ -7,7 +7,7 @@
   {% if signed_in %}
     <p>You can close this tab — Jamgraf has the sign-in, and its own window has
       already noticed.</p>
-    <p class="muted note">The token is kept in your Keychain, not in a wiki file,
+    <p class="muted note">The token is kept in {{ store_name }}, not in a wiki file,
       so it isn’t included when you save or share a wiki.</p>
   {% else %}
     <div class="banner err">{{ why }}</div>

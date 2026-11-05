@@ -52,11 +52,22 @@ Homepage = "https://github.com/VerinFast/jamgraf"
 Source = "https://github.com/VerinFast/jamgraf"
 Issues = "https://github.com/VerinFast/jamgraf/issues"
 
-# The .app is not what pip ships: this is the server and the MCP stdio endpoint,
-# which is the half that runs anywhere. The desktop window lives in the cask.
+# The Mac .app is not what pip ships. `jamgraf` is the server and `jamgraf-mcp`
+# the MCP stdio endpoint — the half that runs anywhere, with no window and no
+# GUI dependency. `jamgraf-app` is the window, and needs the `desktop` extra;
+# it is how Windows gets one, and it is a no-op install on a Mac that already
+# has the cask.
 [project.scripts]
 jamgraf = "jamgraf.__main__:serve"
 jamgraf-mcp = "jamgraf.__main__:mcp"
+jamgraf-app = "jamgraf.desktop:main"
+
+# pywebview is not a hard dependency: `pip install jamgraf` must stay installable
+# on a headless box, and the Mac app brings its own. On Windows pywebview pulls
+# pythonnet itself and drives Microsoft's WebView2 runtime; a machine without
+# that runtime is told so and gets the browser (jamgraf/desktop/windows.py).
+[project.optional-dependencies]
+desktop = ["pywebview>=6.2"]
 
 # Templates, static assets and the vendored interchange library are runtime
 # data, not incidental files — the server 500s without the first two, and the

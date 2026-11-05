@@ -68,7 +68,7 @@ def _path():
 
 def _load() -> list[dict]:
     try:
-        data = json.loads(_path().read_text())
+        data = json.loads(_path().read_text(encoding="utf-8"))
     except Exception:
         return []
     return data if isinstance(data, list) else []
@@ -84,7 +84,7 @@ def _save(reports: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
     try:
-        tmp.write_text(json.dumps(reports, indent=2))
+        tmp.write_text(json.dumps(reports, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)

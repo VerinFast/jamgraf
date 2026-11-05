@@ -316,10 +316,11 @@ secret, and the callback comes back to Jamgraf's own loopback port. In the
 desktop app it opens in your **web browser** rather than inside Jamgraf's window,
 so you get your usual session, your password manager and whatever second factor
 your organisation uses; the app notices by itself when you're done. The refresh
-token goes in your **Keychain**, never into a wiki file (that file *is* what
-"Save wiki" hands over) and never into a plain config file. Where there's no
-secure store, signing in is switched off and says so rather than falling back to
-writing the token somewhere less safe. The link itself — the address and the
+token goes in your operating system's credential store — the **Keychain** on
+macOS, the **Windows Credential Manager** on Windows — never into a wiki file
+(that file *is* what "Save wiki" hands over) and never into a plain config file.
+Where there's no secure store, signing in is switched off and says so rather than
+falling back to writing the token somewhere less safe. The link itself — the address and the
 remote wiki's name — is recorded outside the wiki too, so it can't travel to
 someone you share the wiki with.
 
@@ -338,6 +339,13 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Or from PyPI, on any platform:
+
+```bash
+pip install jamgraf                # the server + the MCP endpoint, no window
+pip install "jamgraf[desktop]"     # adds `jamgraf-app`, Jamgraf's own window
+```
+
 First run downloads the default embedding model (`fastembed` BGE-small, ONNX,
 ~130 MB) and warms it at startup. No PyTorch required.
 
@@ -354,7 +362,13 @@ python run.py
 # → http://127.0.0.1:8787
 ```
 
-## Desktop app (macOS)
+## Desktop app
+
+macOS gets a packaged `.app`; Windows gets a window from pip (below). Both are
+the same server with a native window around it — one launcher in
+`jamgraf/desktop/`, with only the genuinely platform-specific parts separated.
+
+### macOS
 
 Jamgraf ships as a native `.app` (a WKWebView window over the local server) — see
 [Releases](https://github.com/VerinFast/jamgraf/releases). Or build it yourself:
@@ -371,6 +385,31 @@ is a later step.
 The packaged app stores its data in **`~/Library/Application Support/Jamgraf`**
 (not inside the bundle), so it survives moving/replacing the app. Override with
 `JAMGRAF_DATA`.
+
+### Windows
+
+```powershell
+pip install "jamgraf[desktop]"
+jamgraf-app
+```
+
+The window is Microsoft's **WebView2** — Chromium, so the page keeps the APIs
+WKWebView withholds and the Windows-specific code is almost nothing. Two things
+are worth knowing before you install:
+
+* **WebView2 is required for the window.** pywebview silently falls back to
+  MSHTML (Internet Explorer's engine) without it, and the editor would not
+  render, so Jamgraf checks first, says what is missing and where to get it, and
+  opens in your browser meanwhile — which does everything the window does except
+  the native Save/Open dialogs.
+* **Updates come from pip** (`pip install -U jamgraf`), not from inside the app:
+  self-update swaps a signature-verified `.app` bundle, and there isn't one here.
+
+Kahala sign-in works: the refresh token goes to the **Windows Credential
+Manager**, the counterpart of the Keychain on macOS and for the same reason — it
+must not live in the wiki file, which is what "Save wiki" exports. `jamgraf://`
+deep links are macOS-only. Full detail, including what is and isn't verified yet:
+**[docs/windows.md](docs/windows.md)**.
 
 ### Updates
 
@@ -456,7 +495,9 @@ the app window has owner rights, so parsing is a strict **allow-list**: every sl
 validated, paths constructed rather than echoed, search always scoped to the
 validated wiki. See
 **[docs/deep-links.md](docs/deep-links.md)**. Deep links work in the packaged
-`.app` only — a source run has no `Info.plist` for macOS to route through.
+`.app` only — a source run has no `Info.plist` for macOS to route through, and on
+Windows they are reported unavailable rather than quietly claimed: the registry
+key would name a launcher inside whichever virtualenv pip installed it into.
 
 ### Calendar feeds
 

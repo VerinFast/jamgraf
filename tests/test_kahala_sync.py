@@ -138,14 +138,19 @@ def test_the_refresh_token_never_lands_in_a_wiki_or_in_app_config(
 
     cfg = config.DATA_DIR / "app_config.json"
     if cfg.exists():
-        assert "SECRET-REFRESH" not in cfg.read_text()
-    assert "SECRET-REFRESH" not in (config.DATA_DIR / "wikis.json").read_text()
+        assert "SECRET-REFRESH" not in cfg.read_text(encoding="utf-8")
+    assert "SECRET-REFRESH" not in (config.DATA_DIR / "wikis.json").read_text(encoding="utf-8")
 
 
 def test_no_secure_store_means_no_sign_in_rather_than_a_file(monkeypatch):
     monkeypatch.setattr(secretstore, "available", lambda: False)
     ok, why = kahalaauth.can_sign_in()
-    assert not ok and "Keychain" in why
+    assert not ok
+    # Names the store this machine would have used, whichever that is, and does
+    # not offer a file. Asserting the word "Keychain" made this a macOS test
+    # that would fail on the Windows runner for being right.
+    assert secretstore.store_name().split()[-1] in why
+    assert "file" not in why.lower() or "no secure place" in why
     with pytest.raises(ValueError):
         kahalaauth.begin()
 
@@ -398,7 +403,7 @@ def test_the_link_lives_in_the_registry_not_in_the_wiki(wiki):
     """Otherwise it travels to whoever you share the wiki with."""
     assert kahala.link("main", "https://kahala.example", "remote-wiki")["ok"]
 
-    reg = json.loads((config.DATA_DIR / "wikis.json").read_text())
+    reg = json.loads((config.DATA_DIR / "wikis.json").read_text(encoding="utf-8"))
     entry = [w for w in reg["wikis"] if w["slug"] == "main"][0]
     assert entry["kahala"]["remote"] == "remote-wiki"
 

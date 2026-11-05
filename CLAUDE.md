@@ -72,8 +72,30 @@ two in parity (same substance, different voice) whenever you change either.
 - `jamgraf/kahalaauth.py` — the **OIDC public client** (`good-place-waikiki`,
   auth code + PKCE S256, no secret) that signs in to Kahala. The callback lands
   on our own loopback port, never a custom scheme.
-- `jamgraf/secretstore.py` — the macOS Keychain, and the **refusal to fall back**
-  to a file when there isn't one. The only place a credential is written.
+- `jamgraf/secretstore.py` — the OS credential store, and the **refusal to fall
+  back** to a file when there isn't one. The only place a credential is written;
+  picks a backend by platform and keeps everything that must be true of a stored
+  credential above both.
+- `jamgraf/wincreds.py` — the Windows half of that: the Credential Manager
+  through `advapi32`. The ctypes marshalling is behind one function (`_load`)
+  because it cannot run anywhere but Windows; every *decision* — target name,
+  encoding, length, whether it roams — sits above that seam where a test can see
+  it. See `docs/windows.md`.
+- `jamgraf/desktop/` — the desktop shell: **one launcher, one native module per
+  platform**. The shared half (`__init__`) picks the port, runs uvicorn in a
+  thread, builds the menu bar and opens the window; `macos.py` holds what
+  WKWebView withholds from the page (Apple Event deep links, Dictation,
+  NSPasteboard) and `windows.py` is nearly empty *because* WebView2 is Chromium
+  and withholds none of it. A platform with no native route leaves the method
+  **off** rather than stubbing it. Absence alone is *not* enough for the page to
+  act on, though, and assuming it was is how the Windows mic shipped dead:
+  pywebview injects `window.pywebview.api` asynchronously, so "no
+  `start_dictation`" is indistinguishable from "not injected yet", and
+  `base.html` therefore used to suppress the web speech route on every desktop.
+  The shell states it instead — `JAMGRAF_NATIVE_DICTATION`, set from the API
+  class actually installed, read via `config.native_dictation()` — so the page
+  never guesses from an object that may not have arrived. `jamgraf_app.py`
+  (PyInstaller) and the `jamgraf-app` script both land on `desktop.main`.
 - `jamgraf/deeplink.py` — `jamgraf://` deep links: the allow-list that turns an
   external URL into an in-app destination (see `docs/deep-links.md`).
 - `jamgraf/updater.py` — self-update for the packaged `.app`: signature-verified
@@ -82,6 +104,10 @@ two in parity (same substance, different voice) whenever you change either.
 - `docs/repository-layer.md` — the layering spec (RFC 0001, Phase 0).
 - `docs/vendoring.md` — vendored packages, pins, and re-sync steps.
 - `docs/updates.md` — the auto-update trust model and release procedure.
+- `docs/windows.md` — the Windows install: what `pip install jamgraf[desktop]`
+  gives, why the Windows native module is nearly empty, the WebView2 refusal and
+  the browser fallback, the Credential Manager, what Windows does not get — and
+  which claims are measured, which are CI-only, and which are not verified yet.
 - `docs/deep-links.md` — the `jamgraf://` scheme and why it is an allow-list.
 - `docs/calendar-feeds.md` — subscribed calendars: why the fetch is
   server-side, why the host allow-list is the only thing keeping that route from
@@ -263,6 +289,11 @@ two in parity (same substance, different voice) whenever you change either.
    `app_config.json`, or any other writable place — a replaceable pinned key is
    not a trust root. The bundle's ad-hoc `codesign --sign -` proves nothing about
    origin; it is not a substitute. See `docs/updates.md`.
+   The refusal is unchanged off a bundle — no verified `.app`, no update — but
+   the **next step** is not: `updater.install_kind()` names the install shape so
+   a pip install is pointed at its package manager and a checkout at git, and a
+   shape we don't recognise stays *unknown* rather than being told to run `pip`.
+   Wrong advice is worse than none, which is rule 9's point applied here.
    **The private half is the opposite case, and the two must not be confused.**
    Fetching the *signing* key from the network is exactly what `release.sh` does
    — from Google Secret Manager (`waikikey` in `startupos-328814`, via
@@ -299,8 +330,17 @@ two in parity (same substance, different voice) whenever you change either.
    command**; and **Doorman is never a remedy** — informational only, per rule
    above and `docs/doorman.md`. The one `curl | bash` path (`agy`) keeps its URL
    as a constant in `remedies.py`, names the host before it runs, and only ever
-   runs from a click plus a confirmation — never from a probe. See
-   `docs/capabilities.md`; `tests/test_capabilities.py` guards all of it.
+   runs from a click plus a confirmation — never from a probe. **The package
+   manager is per platform**, because "actionable now" includes what this machine
+   installs things with: Homebrew on macOS, winget on Windows, using winget's own
+   published identifiers (`OpenJS.NodeJS`, `Cloudflare.cloudflared`) — a guess at
+   what a package *might* be called is exactly the invention this rule forbids,
+   so `-e` makes the id exact and the `--accept` flags keep it from hanging on a
+   prompt nobody can see. Jamgraf never installs the package manager itself, and
+   the `curl | bash` path does not exist on Windows at all: winget installs Node
+   outright, so there is nothing for a shell pipeline to rescue. See
+   `docs/capabilities.md` and `docs/windows.md`;
+   `tests/test_capabilities.py` guards all of it.
 
 10. **The calendar element carries its own ICS address; the allow-list is what
     makes that safe.** `calendarfeed.py` fetches an external calendar on the
@@ -333,11 +373,18 @@ two in parity (same substance, different voice) whenever you change either.
     on both ends, so a page deleted locally survives a push and returns on the
     next pull — the UI says that beside the buttons, because calling it "upload"
     or "sync" builds in exactly the surprise issue #58 warned about. **The
-    refresh token lives in the Keychain and nowhere else** (`secretstore`): not
-    in the wiki's `settings` table, because the wiki file *is* what "Save wiki"
-    exports, and not in `app_config.json`, because that is plaintext in the data
-    dir; with no secure store, signing in is refused and reported rather than
-    quietly downgraded to a file. The link record (address + remote slug) is not
+    refresh token lives in the OS credential store and nowhere else**
+    (`secretstore`): the Keychain on macOS, the Credential Manager on Windows
+    (`wincreds`) — not in the wiki's `settings` table, because the wiki file *is*
+    what "Save wiki" exports, and not in `app_config.json`, because that is
+    plaintext in the data dir; with no secure store, signing in is refused and
+    reported rather than quietly downgraded to a file. A platform with a real
+    store gets a real backend rather than an exception to this rule, and what
+    may be stored does **not** vary by platform: a value refused on one machine
+    and accepted on another is a sign-in that fails for a reason nobody can see.
+    Persistence is local-machine, never roaming — a credential that follows the
+    user's profile to their other machines is this rule failing with a Win32
+    constant on it. The link record (address + remote slug) is not
     secret but still lives in `wikis.json`, outside the wiki, so it cannot travel
     to whoever you share one with. **Redirects are never followed** — `httpx`
     re-sends the `Authorization` header across a 3xx, which hands a bearer token

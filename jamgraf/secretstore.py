@@ -11,7 +11,11 @@ credential:
   machine on its own, but it is world-readable-to-you plaintext that lands in
   Time Machine and any folder backup.
 
-So credentials go to the macOS Keychain instead, via the ``security`` tool.
+So credentials go to the operating system's own credential store instead:
+the macOS Keychain, via the ``security`` tool, and the Windows Credential
+Manager, via :mod:`wincreds`. Both are reached through here, because what
+must be true of a stored credential is a property of this module and not of
+either platform.
 
 What this actually buys, stated honestly
 ----------------------------------------
@@ -39,7 +43,7 @@ fail loudly rather than creatively.
 No silent fallback
 ------------------
 :func:`available` reports whether there is a real secure store here. When there
-isn't — a future Linux or Windows build, or a Mac where ``security`` is missing —
+isn't — a future Linux build, or a Mac where ``security`` is missing —
 callers must refuse to sign in and say so. Writing the token to a file "just for
 now" is exactly the outcome this module exists to prevent, so there is no file
 backend to fall back to, not even a hidden one.
@@ -48,6 +52,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+
+from . import wincreds
 import sys
 
 SERVICE = "Jamgraf"
@@ -65,8 +72,31 @@ def _security() -> str | None:
     return shutil.which("security")
 
 
+def _windows() -> bool:
+    """Whether this machine's store is the Windows Credential Manager.
+
+    Decided by platform, never by probing for a tool: a Mac with no ``security``
+    has no secure store and must say so, rather than quietly reaching for
+    another one. Tests that exercise the ``security`` boundary pin this.
+    """
+    return sys.platform == "win32"
+
+
+def store_name() -> str:
+    """What to call this machine's credential store, in a sentence to a person.
+
+    Exists because the sign-in path reports failures by name. "Couldn't save
+    your sign-in to the Keychain" on a Windows machine is a message about
+    somebody else's computer: it names a thing the reader does not have, and
+    hides which store actually refused.
+    """
+    return wincreds.NAME if _windows() else "the macOS Keychain"
+
+
 def available() -> bool:
     """True when this machine has a secure store we can use."""
+    if _windows():
+        return wincreds.available()
     return _security() is not None
 
 
@@ -74,6 +104,8 @@ def unavailable_reason() -> str:
     """Why :func:`available` is False, in words a person can act on."""
     if available():
         return ""
+    if _windows():
+        return wincreds.unavailable_reason()
     return ("This build has no secure place to keep a sign-in token. Jamgraf "
             "uses the macOS Keychain, and the `security` tool it needs isn't "
             "here.")
@@ -87,6 +119,11 @@ def _sendable(value: str) -> bool:
     in a value would be parsed as another ``security`` command -- but none of
     them can legitimately appear in what we store: the account is a Keycloak
     issuer URL and the secret is an OAuth refresh token.
+
+    The check is not conditional on the platform. ``CredWriteW`` has no command
+    parser to confuse, but a value that could be stored on one machine and
+    refused on another would be a sign-in that works on a Mac and fails on
+    Windows for a reason nobody can see.
 
     The ``find``/``delete`` paths pass their arguments as a list, where no
     splitting happens and nothing could be injected in the first place; they
@@ -106,10 +143,18 @@ def set_secret(account: str, secret: str) -> bool:
 
 
 def _set(service: str, account: str, secret: str) -> bool:
-    sec = _security()
-    if not sec or not account or not secret:
+    if not account or not secret:
         return False
     if not _sendable(account) or not _sendable(secret):
+        return False
+    if _windows():
+        return wincreds.set(service, account, secret)
+    return _keychain_set(service, account, secret)
+
+
+def _keychain_set(service: str, account: str, secret: str) -> bool:
+    sec = _security()
+    if not sec:
         return False
     # Interactive mode: the command (and so the secret) arrives on stdin, never
     # in argv where `ps` would show it to every process running as this user.
@@ -149,8 +194,16 @@ def get_secret(account: str) -> str | None:
 
 
 def _get(service: str, account: str) -> str | None:
+    if not account or not _sendable(account):
+        return None
+    if _windows():
+        return wincreds.get(service, account)
+    return _keychain_get(service, account)
+
+
+def _keychain_get(service: str, account: str) -> str | None:
     sec = _security()
-    if not sec or not account or not _sendable(account):
+    if not sec:
         return None
     try:
         done = subprocess.run(
@@ -178,8 +231,16 @@ def delete_secret(account: str) -> bool:
 
 
 def _delete(service: str, account: str) -> bool:
+    if not account or not _sendable(account):
+        return False
+    if _windows():
+        return wincreds.delete(service, account)
+    return _keychain_delete(service, account)
+
+
+def _keychain_delete(service: str, account: str) -> bool:
     sec = _security()
-    if not sec or not account or not _sendable(account):
+    if not sec:
         return False
     try:
         done = subprocess.run(

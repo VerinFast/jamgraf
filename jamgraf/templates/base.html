@@ -18,7 +18,8 @@
 </head>
 <body>
   <script>window.JAMGRAF_WIKI_NAME = {{ current_wiki_name | tojson }};
-          window.JAMGRAF_DESKTOP = {{ "true" if is_desktop else "false" }};</script>
+          window.JAMGRAF_DESKTOP = {{ "true" if is_desktop else "false" }};
+          window.JAMGRAF_NATIVE_DICTATION = {{ "true" if native_dictation else "false" }};</script>
   {# Find in page. WKWebView has no built-in find UI, so Cmd+F is ours to
      implement — see wkFind in the script block below. #}
   <div class="wk-find" id="wk-find" role="search">
@@ -329,10 +330,16 @@
         return (api && api.start_dictation) ? api : null;
       }
       // pywebview injects its api asynchronously, so "is there a native route"
-      // can be false at load and true a moment later. Treat the desktop app as
-      // capable and let the call itself report a problem.
-      var isDesktop = !!window.JAMGRAF_DESKTOP;   // told by the server, not sniffed
-      var supported = !!Rec || isDesktop;
+      // can be false at load and true a moment later. Where the shell HAS one,
+      // treat it as capable and let the call itself report a problem.
+      //
+      // Which shells have one is the server's answer, not a guess from the
+      // injected object: a macOS window does, a WebView2 window does not and
+      // wants the web route. Asking `isDesktop` instead -- as this did -- meant
+      // the Windows mic suppressed the web API and then found no native method,
+      // so it did nothing whatever and said nothing either.
+      var nativeDictation = !!window.JAMGRAF_NATIVE_DICTATION;
+      var supported = !!Rec || nativeDictation;
       var active = null;
 
       function stop() {
@@ -346,7 +353,7 @@
           // pretend to a listening state we cannot track.
           // Desktop first: see the note above — the web object lies here.
           var api = nativeApi();
-          if (isDesktop && api) {
+          if (nativeDictation && api) {
             input.focus();
             Promise.resolve(api.start_dictation()).then(function (res) {
               if (res && res.ok === false) {
@@ -357,7 +364,10 @@
             }).catch(function () {});
             return;
           }
-          if (!Rec || isDesktop) return;           // nothing usable here
+          // A shell that owns dictation but hasn't injected its api yet: wait
+          // for the next click rather than starting a web session the WKWebView
+          // object would fail anyway.
+          if (nativeDictation || !Rec) return;     // nothing usable here
           if (active && active.btn === btn) { stop(); return; }   // toggle off
           stop();
           var rec = new Rec();

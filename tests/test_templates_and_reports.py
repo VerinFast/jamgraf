@@ -152,7 +152,7 @@ def test_a_runaway_agent_cannot_fill_the_disk(queue):
 
 def test_an_oversized_body_is_capped(queue):
     bugreports.add("Big", "y" * (bugreports.MAX_BODY * 2))
-    assert len(json.loads((config.DATA_DIR / "bug_reports.json").read_text())
+    assert len(json.loads((config.DATA_DIR / "bug_reports.json").read_text(encoding="utf-8"))
                [0]["body"]) == bugreports.MAX_BODY
 
 

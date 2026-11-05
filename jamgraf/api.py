@@ -27,7 +27,7 @@ from . import (accesslog, ai, appconfig, auth, authoring, backups, bonjour,
                bugreports, calendarfeed, capabilities, chat, collab, doorman,
                config, db, debuglog, deeplink, edits, elements, embeddings,
                help_content, imagegen, kahala, kahalaauth, pdfgen, rag, render,
-               store, structure, tunnel, updater, wikis)
+               secretstore, store, structure, tunnel, updater, wikis)
 
 
 @asynccontextmanager
@@ -552,6 +552,7 @@ def _ctx(request: Request, **extra) -> dict:
         "wikis": wikis.list_wikis(),
         "version": config.VERSION,
         "is_desktop": config.is_desktop(),
+        "native_dictation": config.native_dictation(),
         # "owner" (loopback) or "guest" (LAN, password) — templates hide the
         # owner-only controls from guests so the UI matches what they can do.
         "role": request.scope.get("jamgraf_role", "owner"),
@@ -675,8 +676,7 @@ def connect_page(request: Request):
     return templates.TemplateResponse(request, "help.html", _ctx(
         request,
         claude_config=json.dumps(_claude_config(request), indent=2),
-        config_path=str(Path.home() / "Library" / "Application Support" /
-                        "Claude" / "claude_desktop_config.json"),
+        config_path=str(config.claude_desktop_config_path()),
         web_url=f"{request.url.scheme}://{request.url.netloc}",
     ))
 
@@ -890,7 +890,9 @@ def _kahala_done_page(request: Request, ok: bool, why: str):
     # Through _ctx like every other page: this renders in a browser that is not
     # the app's window, and a bare context would drop the chrome base.html needs.
     return templates.TemplateResponse(
-        request, "kahala_done.html", _ctx(request, signed_in=ok, why=why))
+        request, "kahala_done.html",
+        _ctx(request, signed_in=ok, why=why,
+             store_name=secretstore.store_name()))
 
 
 @app.post("/kahala/signout")

@@ -126,6 +126,58 @@ def migrate_legacy_data_dir(parent: Path, new_name: str = "Jamgraf",
 
 # Project root and data location -------------------------------------------------
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def user_data_dir() -> Path:
+    """Where a per-user install keeps its wikis, by platform convention.
+
+    On macOS this is the same directory the packaged `.app` uses, deliberately:
+    someone who installs the cask and also pip-installs the MCP server should
+    find one set of wikis, not two.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA")
+                    or Path.home() / "AppData" / "Local")
+        return base / "Jamgraf"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Jamgraf"
+    return Path(os.environ.get("XDG_DATA_HOME")
+                or Path.home() / ".local" / "share") / "jamgraf"
+
+
+def _installed_as_package() -> bool:
+    """True when this copy lives in site-packages rather than a checkout."""
+    if (ROOT / "pyproject.toml").is_file():
+        return False
+    return any(p.name in ("site-packages", "dist-packages") for p in ROOT.parents) \
+        or ROOT.name in ("site-packages", "dist-packages")
+
+
+def _checkout_or_user_data() -> Path:
+    """The default data directory for an unfrozen install.
+
+    A checkout keeps `./data`, which is what makes a dev copy self-contained and
+    is why this was the only branch for a long time. A **pip install** must not:
+    `ROOT` there is site-packages, so the default wrote the user's wikis inside
+    the Python installation --- which `pip install -U` is entitled to replace,
+    and which a machine-wide install does not let a normal user write at all.
+    Since `DATA_DIR.mkdir()` runs at import, that was not a bad default but a
+    `PermissionError` before the app could say anything.
+
+    An existing `ROOT/data` is still used even for a package install. It should
+    not be there, but if it is, it holds somebody's wikis --- and silently
+    reading a different directory would look exactly like losing them.
+    """
+    if not _installed_as_package():
+        return ROOT / "data"
+    legacy = ROOT / "data"
+    if legacy.is_dir() and any(legacy.iterdir()):
+        print(f"[jamgraf] using the data directory already in place at {legacy}. "
+              f"It sits inside the Python package, where an upgrade may remove "
+              f"it: move it to {user_data_dir()} (or set JAMGRAF_DATA).",
+              file=sys.stderr)
+        return legacy
+    return user_data_dir()
 if env("DATA"):
     # Named explicitly, so used exactly as named. A pre-rename config naming the
     # old default still works, because after the move that path is a symlink.
@@ -140,7 +192,7 @@ elif getattr(sys, "frozen", False):
         print(f"[jamgraf] data directory from before the rename: {_outcome} "
               f"({_support / LEGACY_NAME} -> {_default_data})", file=sys.stderr)
 else:
-    _default_data = ROOT / "data"
+    _default_data = _checkout_or_user_data()
 DATA_DIR = _default_data
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 # Legacy single-DB path (pre multi-wiki). Migrated into wikis/main.db on first run.
@@ -157,6 +209,18 @@ HELP_WIKI = "help"
 # True when running inside the packaged desktop shell (set by jamgraf_app before
 # the server starts). The page uses it to choose the native dictation route,
 # because WKWebView has no SpeechRecognition.
+def native_dictation() -> bool:
+    """Whether the desktop shell around us offers its own dictation route.
+
+    Separate from :func:`is_desktop` because the page has to choose between a
+    native route and the browser's speech API, and "I am in a window" does not
+    answer that -- macOS has a native route, a WebView2 window has none and uses
+    the web one. Set by ``jamgraf.desktop`` from the API class it actually
+    installed, so there is one source of truth and the page never guesses.
+    """
+    return env("NATIVE_DICTATION") == "1"
+
+
 def is_desktop() -> bool:
     return env("DESKTOP") == "1"
 
@@ -269,6 +333,24 @@ CHUNK_CHARS = 1000
 CHUNK_OVERLAP = 150
 RAG_TOP_K = 6
 RRF_K = 60  # reciprocal-rank-fusion constant
+
+
+def claude_desktop_config_path() -> Path:
+    """Where Claude Desktop keeps the file the Connect page tells you to edit.
+
+    Three different places, and the page is useless if it names the wrong one:
+    someone follows it, finds nothing there, and creates a second config the app
+    will never read. Here rather than in the route because it is a fact about
+    this platform, which is what this module is for.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA")
+                    or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "Claude" / "claude_desktop_config.json"
 
 
 def mcp_server_config(web_url: str | None = None) -> dict:
