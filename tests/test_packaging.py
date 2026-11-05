@@ -67,10 +67,10 @@ _PYWEBVIEW_FILTER = re.compile(r'^([\w ]+)\((\*(?:\.(?:\w+|\*))*(?:;\*(?:\.(?:\w
 def _dialog_filters() -> list[str]:
     """Every file-dialog filter the desktop shell declares.
 
-    Parsed, not imported: `jamgraf_app.py` imports `webview` at call time but
-    starts a server at module scope, and the suite must not run either.
+    Parsed, not imported: the shell imports `webview` at call time, and the
+    suite must not start a server or a window.
     """
-    tree = ast.parse((_ROOT / "jamgraf_app.py").read_text())
+    tree = ast.parse((_ROOT / "jamgraf" / "desktop" / "api.py").read_text())
     found: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -88,7 +88,8 @@ def test_every_file_dialog_filter_is_one_pywebview_accepts():
     """A filter pywebview rejects is a button that silently does nothing."""
     filters = _dialog_filters()
     assert filters, (
-        "no *FILE_TYPES tuple found in jamgraf_app.py — if the dialog filters "
+        "no *FILE_TYPES tuple found in jamgraf/desktop/api.py — if the dialog "
+        "filters "
         "moved or were inlined again, point this test at them rather than "
         "deleting it; an unchecked filter is a dead Open button")
     for f in filters:
