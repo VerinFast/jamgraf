@@ -6,6 +6,7 @@ network. The active wiki defaults to "main".
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import threading
 import time
@@ -236,48 +237,56 @@ def _open_fd_on(path) -> bool:
     return False
 
 
-@pytest.fixture
-def as_if_windows(monkeypatch):
-    """Apply Windows's file rules, and take its branch through `db.file_move`.
+@contextlib.contextmanager
+def windows_file_rules():
+    """Apply Windows's file rules for the duration of a block.
 
-    Both halves matter. Flipping `db.OPEN_FILES_CAN_MOVE` alone picks the branch
-    but still runs on an OS that would move the file regardless, so a test would
-    pass with the handles wide open. Refusing the syscall alone would fail
-    whatever the code does. Together they are the Windows job, run on macOS.
+    Both halves matter. Flipping `db.OPEN_FILES_CAN_MOVE` alone picks the
+    Windows branch but still runs on an OS that would move the file regardless,
+    so a test would pass with the handles wide open. Refusing the syscall alone
+    would fail whatever the code does. Together they are the Windows job, run on
+    macOS.
+
+    A context manager and not only a fixture, because a test may need the two
+    platforms in turn — a rename that deliberately leaves a handle open the
+    POSIX way, and then a delete that has to close it the Windows way.
     """
     import os as _os
-    import platform
 
     from jamgraf import db
 
-    if platform.system() != "Darwin" and _os.name != "posix":  # pragma: no cover
-        pytest.skip("the /dev/fd check this leans on is POSIX-only")
+    real = (db.OPEN_FILES_CAN_MOVE, _os.rename, _os.unlink, _os.remove)
 
-    monkeypatch.setattr(db, "OPEN_FILES_CAN_MOVE", False)
-
-    real_rename, real_unlink, real_remove = _os.rename, _os.unlink, _os.remove
-
-    def _refuse(verb, path):
+    def refuse(verb, path):
         raise PermissionError(
-            32, f"[as_if_windows] cannot {verb} {Path(path).name}: this process "
-                f"still holds an open handle on it")
+            32, f"[windows_file_rules] cannot {verb} {Path(path).name}: this "
+                f"process still holds an open handle on it")
 
-    def rename(src, dst, **kw):
-        if _open_fd_on(src):
-            _refuse("rename", src)
-        return real_rename(src, dst, **kw)
+    def guard(verb, fn):
+        def wrapped(path, *a, **kw):
+            if _open_fd_on(path):
+                refuse(verb, path)
+            return fn(path, *a, **kw)
+        return wrapped
 
-    def unlink(path, **kw):
-        if _open_fd_on(path):
-            _refuse("unlink", path)
-        return real_unlink(path, **kw)
+    db.OPEN_FILES_CAN_MOVE = False
+    _os.rename = guard("rename", real[1])
+    _os.unlink = guard("unlink", real[2])
+    _os.remove = guard("remove", real[3])
+    try:
+        yield
+    finally:
+        db.OPEN_FILES_CAN_MOVE, _os.rename, _os.unlink, _os.remove = real
 
-    def remove(path, **kw):
-        if _open_fd_on(path):
-            _refuse("remove", path)
-        return real_remove(path, **kw)
 
-    monkeypatch.setattr(_os, "rename", rename)
-    monkeypatch.setattr(_os, "unlink", unlink)
-    monkeypatch.setattr(_os, "remove", remove)
-    yield
+@pytest.fixture
+def as_if_windows():
+    """Windows's file rules for the whole test. See `windows_file_rules`."""
+    import os as _os
+
+    if _os.name != "posix":  # pragma: no cover - the /dev/fd check is POSIX-only
+        pytest.skip("the /dev/fd check this leans on is POSIX-only")
+    with windows_file_rules():
+        yield
+
+

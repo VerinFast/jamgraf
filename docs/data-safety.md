@@ -609,6 +609,22 @@ knows SQLite (rule 2) — `wikis.py` just wraps its file operations in
   reopened rather than escaping the snapshot `close_wiki_handles` took, since
   opening a database is far too slow to hold a lock across.
 
+Three more pieces of bookkeeping are part of the same job. **A rename re-files
+the handles it leaves open** (`db._rekey_handles`): on POSIX they stay open on
+purpose, pointing at the same inode, but they were *registered* under the old
+slug — so deleting the wiki later looked under the new one, found nothing, and
+left a handle open on a file it then unlinked, whose next write goes into an
+inode with no name and is gone with nothing said. **The cache epoch is per
+wiki**: it used to be one counter, so moving any wiki retired every handle in
+the process, and a store function that asks for its connection again inside its
+own `transaction()` (`_snapshot` does) was handed a different one with the BEGIN
+still open on the one it left — half a save on each connection, or, once closing
+actually worked, none. And **saving a wiki to a `.wiki` file re-checks its
+address** between the database snapshot (`db.backup_db`, by path) and the image
+query (`get_conn`, by slug): a rename finishing between the two would have
+produced a zip of one wiki's pages with another wiki's pictures, and handed it
+to someone as a backup.
+
 Two orderings turned out to matter, both of them only because the step can now
 fail. **A delete removes the files before it deregisters the wiki**: the other
 way round leaves a file nobody is tracking, so `create_wiki` hands the same slug
@@ -654,6 +670,31 @@ everywhere is the thing that actually mattered: the write never disappears
 silently, and it never lands in a different wiki.
 `test_a_write_in_flight_when_the_address_changes_is_not_lost` states both
 outcomes and asserts the one that is never acceptable on either.
+
+### What is still true on Windows, and named
+
+* **A handle in another process is beyond reach.** `_handles` is this process's.
+  The MCP server is a separate one with a connection cache of its own, and a
+  single open handle anywhere is enough for Windows to refuse a rename or an
+  unlink — so closing all of ours is necessary and not sufficient. There is no
+  IPC to ask it to let go, so the refusal names the likely holder instead
+  (`db.handles_elsewhere_note`) rather than leaving the user to guess which of
+  their own programs is at fault. The outcome is a clear refusal with nothing
+  moved, which is the acceptable end of this trade.
+* **An index rebuild can be cut short.** `rag.reindex_page` deletes and reinserts
+  a page's chunks outside `db.transaction()`, on purpose — it embeds, and holding
+  the write lock across that would queue every other writer (question 1) — so it
+  has no transaction depth for the refusal to see. A Windows move landing in the
+  middle closes that connection and the rebuild fails part-way. The index is a
+  cache rebuildable from the markdown, which is accepted risk 2 already; what is
+  new is only that a move can trigger it. It heals on that page's next save or a
+  rebuild from Settings, and it fails loudly rather than silently.
+* **Two renames to the same new address can still collide.** `plan_slug_change`
+  checks the destination and `file_move` serialises by *source* slug, so two
+  renames of different wikis to the same unused slug can both pass the check.
+  That is unchanged by this work — it needs a reservation on the destination —
+  and it takes two simultaneous renames, which the single local UI does not
+  readily produce.
 
 ### How this is tested without Windows
 

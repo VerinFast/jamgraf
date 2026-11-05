@@ -223,7 +223,7 @@ def change_slug(slug: str, new_slug: str) -> str:
     # the platform, not of this function: see `db.OPEN_FILES_CAN_MOVE`.
     moved: list[tuple[Path, Path]] = []
     try:
-        with db.file_move(slug):
+        with db.file_move(slug, becomes=target):
             try:
                 # Sidecars before the database. Nothing can open the new name
                 # until the registry names it, below, but the ordering costs
@@ -268,7 +268,7 @@ def change_slug(slug: str, new_slug: str) -> str:
         raise ValueError(
             f"'{name_of(slug)}' could not be moved: {exc.strerror or exc}. "
             f"It is still at /{slug} with everything in it; try again in a "
-            f"moment.") from exc
+            f"moment.{db.handles_elsewhere_note()}") from exc
     return target
 
 
@@ -342,7 +342,7 @@ def delete_wiki(slug: str) -> bool:
         raise ValueError(
             f"'{label}' could not be deleted: {exc.strerror or exc}. It is "
             f"still listed at /{slug}; close anything using it and try "
-            f"again.") from exc
+            f"again.{db.handles_elsewhere_note()}") from exc
     return True
 
 
@@ -489,6 +489,18 @@ def export_to(slug: str, dest_path: str) -> str:
 
     token = db.current_wiki.set(slug)
     try:
+        # The database went out through `backup_db`, which opens the file by
+        # path; the images come through `get_conn`, which resolves a *slug*. If
+        # this wiki's address changed between the two, `db.active_wiki()` falls
+        # back to the registry default for a slug it no longer knows — and the
+        # export would be one wiki's pages zipped up with another wiki's
+        # pictures, with nothing saying so. Check, rather than hand that to
+        # someone as a backup of their wiki.
+        if not exists(slug):
+            raise ValueError(
+                f"the wiki '{slug}' was renamed or deleted while it was being "
+                f"saved, so nothing was written. Save it again at its new "
+                f"address.")
         media = db.get_conn().execute(
             "SELECT id, filename, data FROM images").fetchall()
     finally:

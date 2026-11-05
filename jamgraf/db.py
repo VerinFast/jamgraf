@@ -46,7 +46,16 @@ _schema_ready: set[str] = set()
 # through it -- the fd follows the renamed file, so those writes land in the
 # renamed wiki under the old name, which is the same class of bug as serving
 # a file that has been deleted.
-_cache_epoch = 0
+#
+# **Per wiki, not process-wide.** It used to be one counter for everything, so
+# moving one wiki retired every handle in the process -- including one a save on
+# an unrelated wiki was holding. A store function that calls `get_conn()` again
+# inside its own `transaction()` (`_snapshot` does) would then be handed a
+# *different* connection, with its BEGIN still open on the one it left behind:
+# half the save on one connection and half on another, or, once closing
+# actually worked, no connection at all. A move is a fact about one wiki, so it
+# invalidates one wiki.
+_cache_epoch: dict[str, int] = {}
 
 # --- Moving a wiki's files ----------------------------------------------------
 #
@@ -390,7 +399,7 @@ def get_conn():
         conns = {}
         _local.conns = conns
     conn = conns.get(wiki)
-    if conn is not None and getattr(conn, "epoch", None) != _cache_epoch:
+    if conn is not None and getattr(conn, "epoch", None) != _epoch_of(wiki):
         _shut(conn, wiki)
         conns.pop(wiki, None)
         conn = None
@@ -427,7 +436,7 @@ def get_conn():
             # is a bug and keeps its own traceback.
             raise _as_unreadable(exc, wiki) from exc
         _load_sqlite_vec(conn)
-        conn.epoch = _cache_epoch
+        conn.epoch = _epoch_of(wiki)
         conn.owner_thread = threading.current_thread().name
         with _moving_cv:
             # Opening a database is file I/O and schema work, far too slow to
@@ -476,8 +485,12 @@ def get_conn():
     return conn
 
 
-def invalidate_connections() -> None:
-    """Retire every cached handle in every thread, at its next use.
+def _epoch_of(wiki: str) -> int:
+    return _cache_epoch.get(wiki, 0)
+
+
+def invalidate_connections(wiki: Optional[str] = None) -> None:
+    """Retire `wiki`'s cached handles in every thread, at their next use.
 
     For a wiki whose file has moved. A handle still open in another thread is
     *stale*, not broken: on POSIX it follows the renamed file, so a write
@@ -485,9 +498,15 @@ def invalidate_connections() -> None:
     a thread going on using it for the *old* name, because that name can be
     registered again — so each thread drops its own the next time it asks, by
     comparing the epoch its handle was opened in against this one.
+
+    One wiki, because a move is a fact about one wiki and a save in flight on
+    another must not be disturbed by it. `None` retires everything, which is
+    what the whole-process cases (a data directory moving under a test) want.
     """
-    global _cache_epoch
-    _cache_epoch += 1
+    with _handles_lock:
+        for w in ([wiki] if wiki is not None else list(_cache_epoch)
+                  + list(_handles)):
+            _cache_epoch[w] = _cache_epoch.get(w, 0) + 1
 
 
 def _shut(conn, wiki: str, checkpoint: bool = False) -> Optional[str]:
@@ -571,10 +590,26 @@ def close_wiki_handles(wiki: str) -> int:
         # half-done close with a matching epoch would hand some thread a closed
         # connection. The epoch is what each thread checks, so it moves here,
         # on the way out, either way.
-        invalidate_connections()
+        invalidate_connections(wiki)
     if refused:
         raise WikiBusy(wiki, "; ".join(refused))
     return len(live)
+
+
+def handles_elsewhere_note() -> str:
+    """Why a move can still be refused with every handle of ours closed.
+
+    `_handles` is this process's. The MCP server is a **separate** process with
+    a connection cache of its own, and on Windows one open handle anywhere is
+    enough to refuse a rename or an unlink — so closing all of ours is necessary
+    and not always sufficient. There is no IPC to ask it to let go, so the
+    honest thing is to name the likely holder in the refusal rather than let the
+    user wonder which of their own programs is at fault.
+    """
+    if OPEN_FILES_CAN_MOVE:
+        return ""
+    return (" An agent connected over MCP, or another copy of Jamgraf, keeps "
+            "its own connection to this wiki and has to let go of it first.")
 
 
 def _await_move(wiki: str) -> bool:
@@ -625,8 +660,27 @@ def _wikis():
     return wikis
 
 
+def _rekey_handles(old: str, new: str) -> None:
+    """Follow a renamed wiki's still-open handles to its new slug.
+
+    On POSIX a handle another thread cached before the move is left open on
+    purpose: it points at the same inode, so the write it is carrying arrives in
+    this wiki under its new address. But it was *registered* under the old slug,
+    and the registry is what `close_wiki_handles` reads — so deleting that wiki
+    later would have looked under the new slug, found nothing, and left the
+    handle open on a file about to be unlinked. On POSIX that write then goes
+    into an inode with no name and is gone with nothing said; on Windows the
+    unlink is refused by a handle nobody could find. Either way the fix is to
+    file them where they now live.
+    """
+    with _handles_lock:
+        live = _handles.pop(old, None)
+        if live:
+            _handles.setdefault(new, weakref.WeakSet()).update(live)
+
+
 @contextlib.contextmanager
-def file_move(wiki: str, *, vanishing: bool = False):
+def file_move(wiki: str, *, vanishing: bool = False, becomes: Optional[str] = None):
     """Hold `wiki`'s database still so its files can be renamed or removed.
 
     Everything `db` knows about moving a wiki's files is in here, so `wikis.py`
@@ -651,6 +705,10 @@ def file_move(wiki: str, *, vanishing: bool = False):
     * **Cached handles are retired** on the way out, whichever branch ran, so no
       thread goes on using the old name through a handle from before the move.
 
+    `becomes` is the slug this wiki will answer to afterwards. Handles left open
+    across the move are re-filed under it on success, so a later delete can
+    still find them (`_rekey_handles`).
+
     Raises `WikiBusy` without touching anything if a save is in flight.
     """
     with _moving_cv:
@@ -663,8 +721,15 @@ def file_move(wiki: str, *, vanishing: bool = False):
         else:
             release_wiki_handles(wiki)
         yield
+    except BaseException:
+        raise                      # the files are back; the keys never changed
+    else:
+        if becomes:
+            _rekey_handles(wiki, becomes)
     finally:
-        invalidate_connections()
+        invalidate_connections(wiki)
+        if becomes:
+            invalidate_connections(becomes)
         with _moving_cv:
             _moving.pop(wiki, None)
             _moving_cv.notify_all()

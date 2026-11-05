@@ -1022,3 +1022,86 @@ def test_a_connection_still_looks_busy_while_its_commit_runs(wiki):
         assert store.get_page("committed") and store.get_page("rolled-back") is None
     finally:
         db.current_wiki.reset(tok)
+
+
+def test_deleting_a_renamed_wiki_closes_the_handle_filed_under_its_old_name(
+        wiki):
+    """A handle left open across a rename is still a handle when it is deleted.
+
+    On POSIX `change_slug` leaves other threads' handles open on purpose — they
+    point at the same inode, so the write one is carrying arrives in this wiki
+    under its new address. But they were *registered* under the old slug, and
+    that registry is what `db.close_wiki_handles` reads. So deleting the wiki
+    afterwards looked under the new slug, found nothing, and left the handle
+    open: its next write goes into an inode with no name and is gone with
+    nothing said, and on Windows the unlink would be refused by a handle nobody
+    could find. Rename has to re-file them.
+
+    The invariant is the same on both platforms and is what this asserts:
+    **after a rename nothing is registered under the address the wiki left, and
+    deleting it closes every handle that is left.** Only the starting point
+    differs — where the OS will not move an open file the rename has already
+    closed them, so there is nothing to re-file, which is why this needs no
+    fixture to pin the bookkeeping either way.
+    """
+    slug = wikis.create_wiki("Twice Moved")
+    _seed(slug, "Here", "briefly")
+    pool, held = _handle_on(slug)
+    try:
+        assert wikis.change_slug(slug, "twice-moved-again") == "twice-moved-again"
+
+        assert slug not in db._handles, "still filed under the address it left"
+        if db.OPEN_FILES_CAN_MOVE:
+            # The handle is open and now belongs to the new address.
+            assert held in db._handles.get("twice-moved-again", ()), (
+                "a handle left open across the rename was not re-filed")
+            assert not getattr(held, "wk_closed", False)
+
+        assert wikis.delete_wiki("twice-moved-again") is True
+
+        # Whatever was open is closed, and nothing is registered anywhere.
+        assert getattr(held, "wk_closed", False), (
+            "the delete left a handle open on a file it unlinked")
+        assert "twice-moved-again" not in db._handles
+        for suffix in ("", "-wal", "-shm"):
+            assert not (config.WIKIS_DIR
+                        / ("twice-moved-again.db" + suffix)).exists()
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_moving_one_wiki_leaves_a_save_on_another_alone(wiki):
+    """The epoch is per wiki, because a move is a fact about one wiki.
+
+    It used to be one counter for the whole process, so renaming any wiki
+    retired every handle in it. A store function that asks for its connection
+    again inside its own `transaction()` would then be handed a *different* one,
+    with the BEGIN still open on the connection it left behind — half a save on
+    each, or, once closing actually worked, a closed one.
+    """
+    _seed("beaconlight", "Existing", "already here")
+    other = wikis.create_wiki("Bystander")
+    _seed(other, "Untouched", "mid-save when the neighbour moved")
+
+    tok = db.current_wiki.set(other)
+    try:
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO pages(slug, title, markdown, html) "
+                         "VALUES ('during', 'During', 'written across it', '')")
+            # A whole other wiki moves while this save is open.
+            saved = db.current_wiki.set("beaconlight")
+            try:
+                wikis.change_slug("beaconlight", "beaconlight-elsewhere")
+            finally:
+                db.current_wiki.reset(saved)
+            # Same connection, same transaction: not retired by someone else's
+            # move, and still the one holding the BEGIN.
+            assert db.get_conn() is conn
+            assert db._tx(conn).depth == 1
+            conn.execute("INSERT INTO pages(slug, title, markdown, html) "
+                         "VALUES ('after', 'After', 'and the rest of it', '')")
+        # Both halves of the save committed together.
+        assert {p["slug"] for p in store.list_pages()} == {
+            "untouched", "during", "after"}
+    finally:
+        db.current_wiki.reset(tok)

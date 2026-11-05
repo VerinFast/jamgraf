@@ -513,7 +513,16 @@ two in parity (same substance, different voice) whenever you change either.
     in another wiki. `docs/data-safety.md` question 6 records it, and the
     `as_if_windows` fixture makes macOS enforce the Windows rule so none of this
     can regress unseen — it refuses `os.rename`/`os.unlink` on any path this
-    process still holds a descriptor on.
+    process still holds a descriptor on. What closing ours cannot fix is named
+    rather than papered over: a handle in the **MCP server's own process** is
+    beyond reach, so the refusal says so (`db.handles_elsewhere_note`).
+    Three pieces of bookkeeping come with it: a rename **re-files** the handles
+    it leaves open (`_rekey_handles`), or a later delete looks under the new
+    slug, finds nothing and leaves one open on a file it unlinks; the cache
+    epoch is **per wiki**, because one process-wide counter meant moving any
+    wiki retired a handle a save on another wiki was holding; and saving a wiki
+    to a file **re-checks its address** between the by-path snapshot and the
+    by-slug image query, or the zip is one wiki's pages with another's pictures.
     Two orderings are part of the rule because the steps can now fail. A
     **delete removes the files before it deregisters the wiki**: the other way
     round leaves a file nobody tracks, so the slug is handed to the next wiki of
