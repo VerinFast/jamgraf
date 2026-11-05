@@ -219,6 +219,19 @@ def _cli_remedy(binary: str) -> dict:
         return _step(rid) or _manual(
             f"Install the {binary} CLI",
             f"Jamgraf has no automatic way to install `{binary}` on this system.")
+    if sys.platform == "win32":
+        # winget installs Node directly, so there is no nvm-shaped middle step
+        # here and nothing is piped into a shell on this platform.
+        if _which("winget"):
+            return _step("install-node-winget", prerequisite=True) or _manual(
+                "Install Node.js", "Node.js brings npm, which installs the CLI.")
+        return _manual(
+            "Install Node.js",
+            f"The {binary} CLI is installed with npm, and this machine has "
+            f"neither npm nor winget to install npm with. Installing Node.js "
+            f"brings npm, after which Jamgraf can install the CLI for you with "
+            f"one click.",
+            url="https://nodejs.org/en/download", link="nodejs.org")
     if _which("brew"):
         return _step("install-node", prerequisite=True) or _manual(
             "Install Node.js", "Node.js brings npm, which installs the CLI.")
@@ -235,13 +248,26 @@ def _cli_remedy(binary: str) -> dict:
         url="https://nodejs.org/en/download", link="nodejs.org")
 
 
-def _brew_remedy(remedy_id: str, what: str) -> dict:
-    """A Homebrew install, or instructions for getting Homebrew.
+def _brew_remedy(remedy_id: str, what: str, winget_id: str = "") -> dict:
+    """A package-manager install, or instructions for getting the manager.
 
-    Jamgraf does not offer to install Homebrew itself: that is another
-    ``curl | bash``, for a package manager rather than one CLI, and it is not
-    ours to push on someone's machine.
+    One function for two platforms because the shape is identical: if the
+    machine has the package manager there is a button, and if it hasn't there
+    are instructions naming what to get first. What Jamgraf will not do either
+    way is install the package manager itself — Homebrew is another
+    ``curl | bash``, winget is part of Windows and comes from the Store, and
+    neither is ours to push onto someone's machine.
     """
+    if sys.platform == "win32":
+        if winget_id and _which("winget"):
+            return _step(winget_id) or _manual(f"Install {what}", "")
+        return _manual(
+            f"Install {what}",
+            f"{what} is installed with winget, which this machine hasn't got. "
+            f"winget arrives with App Installer; once it is there, Jamgraf can "
+            f"install {what} for you with one click.",
+            url="https://learn.microsoft.com/en-us/windows/package-manager/winget/",
+            link="learn.microsoft.com")
     if _which("brew"):
         return _step(remedy_id) or _manual(f"Install {what}", "")
     return _manual(
@@ -424,6 +450,20 @@ def _dictation() -> dict:
         return _cap("dictation", "Dictation", powers, OK,
                     "In a browser, dictation uses the browser's own speech "
                     "recognition. Nothing to install.", backend="browser")
+    if sys.platform != "darwin":
+        # The window here is WebView2, which is Chromium, so the page uses the
+        # web speech route rather than a native one -- there is no equivalent of
+        # macOS Dictation to click, and inventing one is not on offer (rule 9).
+        # What an embedded WebView2 provides is not ours to promise: Chrome's
+        # speech service is not part of the runtime, so this is reported as
+        # "may not", with the route that definitely works named. The mic says so
+        # itself if the browser refuses it.
+        return _cap("dictation", "Dictation", powers, DEGRADED,
+                    "Jamgraf's own window has no native dictation on this "
+                    "platform, so the 🎤 uses the web speech API --- which an "
+                    "embedded WebView2 may not provide. Opening Jamgraf in a "
+                    "browser at the same address always has it.",
+                    backend="browser")
     trusted = _accessibility_trusted()
     remedy = _step("open-accessibility")
     if trusted is True:
@@ -486,15 +526,24 @@ def _updates() -> dict:
         return _cap("updates", "Automatic updates", powers, OK,
                     (f"{waiting} is ready to install." if waiting else
                      "This install can update itself."), where=where)
+    # Rule 9: name the step that is actionable now. A pip install cannot swap
+    # its own bundle and never will, so "replace it with a signed release build"
+    # is not advice there -- `pip install -U` is. Still a manual remedy and not
+    # a button: upgrading someone's Python environment is theirs to run.
+    if updater.install_kind() == "package":
+        detail = ("Nothing to press: Jamgraf is installed here as a Python "
+                  "package, so it updates the way you installed it --- "
+                  "`pip install -U jamgraf` (or uv/pipx), then start it again. "
+                  "Only the signed .app can update itself from inside.")
+    else:
+        detail = ("Nothing to press: this isn't a missing tool, it is how this "
+                  "copy of Jamgraf was built or where it is installed. "
+                  "Replace it with a signed release build to get automatic "
+                  "updates.")
     return _cap("updates", "Automatic updates", powers, UNAVAILABLE,
                 f"Updating is off for this install: {why}.",
-                remedy=_manual(
-                    "Update from here",
-                    "Nothing to press: this isn't a missing tool, it is how this "
-                    "copy of Jamgraf was built or where it is installed. "
-                    "Replace it with a signed release build to get automatic "
-                    "updates.",
-                    settings="/settings#updates"),
+                remedy=_manual("Update from here", detail,
+                               settings="/settings#updates"),
                 where=where, optional=True)
 
 
@@ -508,7 +557,8 @@ def _public_link() -> dict:
     return _cap("public-link", "Temporary public link", powers, UNAVAILABLE,
                 "It runs Cloudflare's `cloudflared` client, which isn't "
                 "installed on this machine.",
-                remedy=_brew_remedy("install-cloudflared", "cloudflared"),
+                remedy=_brew_remedy("install-cloudflared", "cloudflared",
+                                    winget_id="install-cloudflared-winget"),
                 where=where, optional=True)
 
 

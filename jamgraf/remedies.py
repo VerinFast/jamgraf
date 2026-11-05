@@ -86,6 +86,37 @@ PACKAGE_INSTALLS: dict[str, dict] = {
         "detail": "Installs Cloudflare's tunnel client using Homebrew. It is what "
                   "creates the temporary public address.",
     },
+    # Windows. Same two installs, through the package manager that ships with
+    # the OS. The package identifiers are winget's own (OpenJS.NodeJS,
+    # Cloudflare.cloudflared, both in microsoft/winget-pkgs) -- not a guess at
+    # what a package might be called, which is the thing rule 9 forbids. `-e`
+    # makes the id an exact match, so a near-miss is "no package found" rather
+    # than winget choosing something else with a similar name; the two
+    # --accept flags are what make it non-interactive, and without them the
+    # install waits forever on a prompt nobody can see.
+    "install-node-winget": {
+        "label": "Install Node.js first",
+        "verb": "install Node.js",
+        "needs": "winget", "provides": "npm",
+        "argv": ["winget", "install", "-e", "--id", "OpenJS.NodeJS",
+                 "--accept-package-agreements", "--accept-source-agreements"],
+        "source": "winget",
+        "detail": "Installs Node.js — which brings npm — using winget, the "
+                  "package manager built into Windows. The CLI you actually "
+                  "want is installed with npm, and this machine hasn't got npm "
+                  "yet, so this comes first.",
+    },
+    "install-cloudflared-winget": {
+        "label": "Install cloudflared",
+        "verb": "install cloudflared",
+        "needs": "winget", "provides": "cloudflared",
+        "argv": ["winget", "install", "-e", "--id", "Cloudflare.cloudflared",
+                 "--accept-package-agreements", "--accept-source-agreements"],
+        "source": "winget",
+        "detail": "Installs Cloudflare's tunnel client using winget, the package "
+                  "manager built into Windows. It is what creates the temporary "
+                  "public address.",
+    },
 }
 
 # Vendor-published install scripts, downloaded and executed. Riskier than the

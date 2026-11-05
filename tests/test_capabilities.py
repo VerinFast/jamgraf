@@ -499,3 +499,112 @@ def test_a_probe_that_throws_never_takes_the_page_down(wiki, monkeypatch):
     assert r.status_code == 200
     assert _cap("chat")["state"] == capabilities.DEGRADED
     assert 'id="wk-chat-panel"' in r.text          # not greyed out on a bad probe
+
+
+# --- Windows: the same three halves, a different package manager --------------
+#
+# Rule 9 is about the step that is actionable *now*, which is a per-machine
+# question — and a machine's package manager is part of what it is. These pin
+# the Windows answers, and that nothing macOS-shaped leaks into them: a brew
+# step no Windows box can run, or a `curl | bash` on a platform where winget
+# installs Node outright, would each be a button that fails.
+
+@pytest.fixture
+def windows(monkeypatch):
+    monkeypatch.setattr(capabilities.sys, "platform", "win32")
+    return monkeypatch
+
+
+def test_on_windows_node_comes_from_winget_not_homebrew(wiki, windows):
+    _have(windows, "winget")
+    remedy = _cap("chat")["remedy"]
+
+    assert remedy["id"] == "install-node-winget"
+    assert remedy["needs"] == "winget"
+    assert remedy["step"] == "prerequisite"
+
+
+def test_on_windows_without_winget_the_instructions_do_not_mention_homebrew(
+        wiki, windows):
+    """A Homebrew instruction on Windows is advice that cannot be followed."""
+    _have(windows)
+    remedy = _cap("chat")["remedy"]
+
+    assert remedy["kind"] == "manual"
+    assert "Homebrew" not in remedy["why"]
+    assert "winget" in remedy["why"]
+    assert remedy["url"]
+
+
+def test_on_windows_nothing_is_piped_into_a_shell(wiki, windows):
+    """The nvm `curl | bash` path exists because macOS may have no package
+    manager at all. Windows ships one, so the riskiest remedy in the app has no
+    reason to appear here — and `curl` being present must not conjure it.
+    """
+    _have(windows, "curl")
+    remedy = _cap("chat")["remedy"]
+
+    assert remedy["kind"] != "script", "a shell pipeline was offered on Windows"
+    assert remedy["kind"] == "manual"
+
+
+def test_the_public_link_chain_follows_the_platforms_package_manager(wiki, windows):
+    _have(windows)
+    assert _cap("public-link")["remedy"]["kind"] == "manual"
+    _have(windows, "winget")
+    assert _cap("public-link")["remedy"]["id"] == "install-cloudflared-winget"
+
+
+@pytest.mark.parametrize("remedy_id", ["install-node-winget",
+                                       "install-cloudflared-winget"])
+def test_every_winget_install_is_exact_and_non_interactive(remedy_id):
+    """Two ways this argv goes wrong, both silent.
+
+    Without ``-e`` winget treats the id as a search and may install a different
+    package whose name is close enough. Without the two ``--accept`` flags it
+    stops on an agreement prompt nobody can see and the remedy hangs until the
+    timeout, which reads as "Jamgraf is broken" rather than "press yes".
+    """
+    argv = remedies.describe(remedy_id)["argv"]
+
+    assert argv[0] == "winget"
+    assert "-e" in argv and "--id" in argv
+    assert argv[argv.index("--id") + 1].count(".") == 1, \
+        "not a winget package identifier"
+    assert "--accept-package-agreements" in argv
+    assert "--accept-source-agreements" in argv
+
+
+def test_dictation_in_a_windows_window_does_not_promise_what_it_cannot_give(
+        wiki, windows, monkeypatch):
+    """There is no macOS Dictation to click here, and whether an embedded
+    WebView2 provides the web speech API is not ours to promise. So the state is
+    degraded, the words say "may not", and the route that definitely works — a
+    browser at the same address — is named.
+    """
+    monkeypatch.setenv("JAMGRAF_DESKTOP", "1")
+    _have(windows)
+    cap = _cap("dictation")
+
+    assert cap["state"] == "degraded"
+    assert "browser" in cap["reason"]
+    assert "Accessibility" not in cap["reason"], "macOS wording on Windows"
+
+
+def test_a_pip_install_is_pointed_at_pip_not_at_a_release_build(wiki, monkeypatch):
+    """"Replace it with a signed release build" is not a step a pip user can
+    take, and it is the only thing this row used to say. The remedy stays
+    manual: upgrading someone's Python environment is theirs to run, not a
+    button we press for them.
+    """
+    from jamgraf import updater
+
+    monkeypatch.setattr(updater, "install_kind", lambda: "package")
+    monkeypatch.setattr(updater, "can_update",
+                        lambda: (False, "not running from a packaged .app"))
+    _have(monkeypatch)
+    remedy = _cap("updates")["remedy"]
+
+    assert remedy["kind"] == "manual"
+    assert "pip install -U jamgraf" in remedy["why"]
+    assert "signed release build" not in remedy["why"]
