@@ -652,10 +652,15 @@ def test_a_save_in_flight_refuses_the_rename_rather_than_being_closed_under(
         saving = pool.submit(save_slowly)
         assert holding.wait(10)
         try:
-            with pytest.raises(db.WikiBusy) as caught:
+            # A ValueError, like every other refusal `change_slug` can make, so
+            # the route and the MCP tools put it on screen rather than 500.
+            with pytest.raises(ValueError) as caught:
                 wikis.change_slug("beaconlight", "beaconlight-renamed")
-            assert "save(s) in flight" in str(caught.value)
-            assert "nothing was moved" in str(caught.value)
+            said = str(caught.value)
+            assert "being written to right now" in said
+            assert "Nothing was moved" in said
+            assert "a save is in flight" in said     # and why, not just that
+            assert isinstance(caught.value.__cause__, db.WikiBusy)
         finally:
             release.set()
         saving.result()
@@ -724,5 +729,68 @@ def test_a_reader_arriving_mid_move_waits_instead_of_creating_an_empty_wiki(wiki
     tok = db.current_wiki.set("shifted")
     try:
         assert store.get_page("here")["markdown"] == "still here"
+    finally:
+        db.current_wiki.reset(tok)
+
+
+def test_a_busy_wiki_comes_back_as_a_message_not_a_500(wiki, as_if_windows):
+    """Both file-moving routes have a new refusal, so both have to report it.
+
+    `/address` already turned a `ValueError` into the banner on *Manage wikis*;
+    `/delete` had nothing to report before this and so caught nothing, which
+    would have made "someone is saving" a traceback in a packaged app with no
+    console. Driven through the routes rather than the functions, because
+    "nobody reads a 500" is a claim about the routes.
+
+    Under `as_if_windows` because that is where *both* refuse. `/delete` refuses
+    on every platform — it is about to unlink the inode, so no handle on it is
+    allowed to survive — while `/address` only has to close other threads'
+    handles where the OS will not move an open file, and so only refuses there.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from urllib.parse import unquote_plus
+
+    from fastapi.testclient import TestClient
+
+    from jamgraf.api import app
+
+    _seed("beaconlight", "Existing", "already here")
+    holding = threading.Event()
+    release = threading.Event()
+
+    def save_slowly():
+        db.current_wiki.set("beaconlight")
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO pages(slug, title, markdown, html) "
+                         "VALUES ('slow', 'Slow', 'mid-save', '')")
+            holding.set()
+            release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        saving = pool.submit(save_slowly)
+        assert holding.wait(10)
+        try:
+            with TestClient(app, client=("127.0.0.1", 1)) as c:
+                for path, data in (("address", {"new_slug": "beaconlight-moved"}),
+                                   ("delete", {})):
+                    r = c.post(f"/wikis/beaconlight/{path}", data=data,
+                               follow_redirects=False)
+                    assert r.status_code == 303, (path, r.status_code)
+                    where = r.headers["location"]
+                    assert "error=" in where, (path, where)
+                    said = unquote_plus(where)
+                    assert "is being written to right now" in said, (path, said)
+                    assert "a save is in flight" in said, (path, said)
+        finally:
+            release.set()
+        saving.result()
+
+    # Both were refused, so the wiki is exactly where it was, with its save.
+    assert wikis.exists("beaconlight") and not wikis.exists("beaconlight-moved")
+    assert wikis.db_path("beaconlight").exists()
+    tok = db.current_wiki.set("beaconlight")
+    try:
+        assert store.get_page("slow")["markdown"] == "mid-save"
     finally:
         db.current_wiki.reset(tok)

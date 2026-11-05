@@ -531,11 +531,15 @@ def close_wiki_handles(wiki: str) -> int:
         live = list(_handles.get(wiki, ()))
     busy = [c for c in live if getattr(getattr(c, "_wk_tx", None), "depth", 0) > 0]
     if busy:
-        raise WikiBusy(wiki, f"{len(busy)} save(s) in flight on it "
-                             f"(thread {busy[0].owner_thread}); nothing was moved")
+        # The reason says what is true, not what the caller was going to do:
+        # this closes handles and it has closed none, so what did not happen is
+        # the caller's sentence to write (`wikis.change_slug`, `delete_wiki`).
+        plural = "a save is" if len(busy) == 1 else f"{len(busy)} saves are"
+        raise WikiBusy(wiki, f"{plural} in flight on it "
+                             f"(thread {busy[0].owner_thread})")
     refused = [r for r in (_shut(c, wiki, checkpoint=True) for c in live) if r]
     if refused:
-        raise WikiBusy(wiki, "; ".join(refused) + " — nothing was moved")
+        raise WikiBusy(wiki, "; ".join(refused))
     # Every handle that was open is closed, so the thread that owned it must not
     # find it in its own cache and use it. The epoch is what each thread checks.
     invalidate_connections()

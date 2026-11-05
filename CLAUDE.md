@@ -493,7 +493,10 @@ two in parity (same substance, different voice) whenever you change either.
     **refused, never forced**: a connection inside `transaction()` is part-way
     through rule 6's atomic unit, so the move raises `db.WikiBusy` with nothing
     closed and nothing moved, and a handle that will not close is reported the
-    same way, naming its thread. Readers are **held off** for the few
+    same way, naming its thread. `wikis.py` turns that into the `ValueError`
+    every other refusal there already speaks, so `/wikis/{slug}/address` and
+    `/wikis/{slug}/delete` put it in the page's banner — a refusal nobody can
+    read is a 500, and a packaged app has no console to read it in. Readers are **held off** for the few
     milliseconds of the move, because the instant between the close and the
     registry write is one where SQLite would *create* an empty database at the
     old path — a rename that silently empties the wiki. And how much has to

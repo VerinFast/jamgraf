@@ -588,7 +588,11 @@ knows SQLite (rule 2) — `wikis.py` just wraps its file operations in
   told, and the saving thread would fail somewhere far from the cause. So a wiki
   with a save in flight is refused — `db.WikiBusy`, nothing closed and nothing
   moved — and the user tries again a moment later. A handle that will not close
-  is reported the same way, naming the thread that owns it.
+  is reported the same way, naming the thread that owns it. `wikis.py` restates
+  it as the `ValueError` its other refusals already use, so both routes put it in
+  the *Manage wikis* banner rather than raising a 500 at a packaged app with no
+  console; `/wikis/{slug}/delete` caught nothing before this, because before
+  this it had nothing to report.
 * **A barrier for readers.** Once handles really close, the instant between the
   close and the registry write becomes dangerous: the file is not where the
   registry says it is, and SQLite *creates* an empty database for a path that

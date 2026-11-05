@@ -221,29 +221,40 @@ def change_slug(slug: str, new_slug: str) -> str:
     # way out. It refuses with `db.WikiBusy` — nothing closed, nothing moved —
     # if a save is in flight. How many handles it has to close is a property of
     # the platform, not of this function: see `db.OPEN_FILES_CAN_MOVE`.
-    with db.file_move(slug):
-        moved: list[tuple[Path, Path]] = []
-        # Sidecars before the database. Nothing can open the new name until the
-        # registry names it, below, but the ordering costs nothing and means
-        # there is never an instant where a database is visible without its log.
-        for suffix in ("-shm", "-wal", ""):
-            a, b = Path(str(src) + suffix), Path(str(dest) + suffix)
-            if a.exists():
-                a.rename(b)
-                moved.append((a, b))
-        try:
-            with _lock:
-                reg = _load()
-                for w in reg["wikis"]:
-                    if w["slug"] == slug:
-                        w["slug"] = target
-                if reg.get("default") == slug:
-                    reg["default"] = target
-                _save(reg)
-        except Exception:
-            for a, b in reversed(moved):
-                b.rename(a)                # the registry still names the old one
-            raise
+    try:
+        with db.file_move(slug):
+            moved: list[tuple[Path, Path]] = []
+            # Sidecars before the database. Nothing can open the new name until
+            # the registry names it, below, but the ordering costs nothing and
+            # means there is never an instant where a database is visible
+            # without its log.
+            for suffix in ("-shm", "-wal", ""):
+                a, b = Path(str(src) + suffix), Path(str(dest) + suffix)
+                if a.exists():
+                    a.rename(b)
+                    moved.append((a, b))
+            try:
+                with _lock:
+                    reg = _load()
+                    for w in reg["wikis"]:
+                        if w["slug"] == slug:
+                            w["slug"] = target
+                    if reg.get("default") == slug:
+                        reg["default"] = target
+                    _save(reg)
+            except Exception:
+                for a, b in reversed(moved):
+                    b.rename(a)            # the registry still names the old one
+                raise
+    except db.WikiBusy as exc:
+        # Every other refusal this function can make is a ValueError the routes
+        # and the MCP tools already turn into a sentence on screen; a wiki that
+        # is being written to is the same kind of answer — "not now, and here is
+        # why" — so it arrives the same way rather than as a 500 nobody reads.
+        # Nothing has moved: `file_move` refuses before it closes anything.
+        raise ValueError(
+            f"'{name_of(slug)}' is being written to right now — {exc.reason}. "
+            f"Nothing was moved; try again in a moment.") from exc
     return target
 
 
@@ -258,20 +269,26 @@ def delete_wiki(slug: str) -> bool:
     Unlinking is also the operation Windows refuses outright while a handle is
     open, which is the same reason stated by the other OS.
     """
-    with db.file_move(slug, vanishing=True):
-        with _lock:
-            reg = _load()
-            before = len(reg["wikis"])
-            reg["wikis"] = [w for w in reg["wikis"] if w["slug"] != slug]
-            if len(reg["wikis"]) == before:
-                return False
-            if reg.get("default") == slug:
-                reg["default"] = reg["wikis"][0]["slug"] if reg["wikis"] else None
-            _save(reg)
-        for suffix in ("", "-wal", "-shm"):
-            f = Path(str(db_path(slug)) + suffix)
-            if f.exists():
-                f.unlink()
+    try:
+        with db.file_move(slug, vanishing=True):
+            with _lock:
+                reg = _load()
+                before = len(reg["wikis"])
+                reg["wikis"] = [w for w in reg["wikis"] if w["slug"] != slug]
+                if len(reg["wikis"]) == before:
+                    return False
+                if reg.get("default") == slug:
+                    reg["default"] = (reg["wikis"][0]["slug"]
+                                      if reg["wikis"] else None)
+                _save(reg)
+            for suffix in ("", "-wal", "-shm"):
+                f = Path(str(db_path(slug)) + suffix)
+                if f.exists():
+                    f.unlink()
+    except db.WikiBusy as exc:
+        raise ValueError(
+            f"'{name_of(slug)}' is being written to right now — {exc.reason}. "
+            f"Nothing was deleted; try again in a moment.") from exc
     return True
 
 
