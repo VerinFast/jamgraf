@@ -92,6 +92,24 @@ _moving_cv = threading.Condition()
 _MOVE_WAIT_SECONDS = 10.0
 
 
+class WikiMoved(RuntimeError):
+    """The wiki you asked for changed address while you were waiting for it.
+
+    Refusing is the only safe answer, and rule 4 is why: `active_wiki()` falls
+    back to the registry default for a slug it cannot find, so carrying on would
+    put this caller's write into whichever wiki happens to be default — someone
+    else's content, silently. A caller that waited at the move barrier named a
+    specific wiki, so it gets told rather than redirected.
+    """
+
+    def __init__(self, wiki: str):
+        super().__init__(
+            f"the wiki '{wiki}' was renamed or deleted while this request was "
+            f"waiting for it. Nothing was read or written. Open it at its new "
+            f"address, or pick it again from the list of wikis.")
+        self.wiki = wiki
+
+
 class WikiBusy(RuntimeError):
     """A wiki's files cannot be moved right now, and nothing has been moved.
 
@@ -366,13 +384,7 @@ def get_conn():
     """Connection for the active wiki, cached per (thread, wiki)."""
     from . import wikis
 
-    wiki = active_wiki()
-    if _await_move(wiki):
-        # We waited for that wiki's files to move, and a move can change its
-        # address. Resolve again rather than open the name it used to have:
-        # SQLite creates an empty database for a path that is not there, so
-        # opening the old name now would quietly manufacture an empty wiki.
-        wiki = active_wiki()
+    wiki = _settled_wiki()
     conns = getattr(_local, "conns", None)
     if conns is None:
         conns = {}
@@ -417,9 +429,22 @@ def get_conn():
         _load_sqlite_vec(conn)
         conn.epoch = _cache_epoch
         conn.owner_thread = threading.current_thread().name
-        conns[wiki] = conn
-        with _handles_lock:
-            _handles.setdefault(wiki, weakref.WeakSet()).add(conn)
+        with _moving_cv:
+            # Opening a database is file I/O and schema work, far too slow to
+            # hold a lock across — so a move can begin while we are in it, and
+            # this handle would be registered *after* `close_wiki_handles` took
+            # its snapshot. On Windows that is the rename failing again, for a
+            # handle nobody could have closed. Registering and checking under
+            # the same lock the mover holds closes that: if a move has started,
+            # drop this connection and go round again.
+            racing = _moving.get(wiki) not in (None, threading.get_ident())
+            if not racing:
+                conns[wiki] = conn
+                with _handles_lock:
+                    _handles.setdefault(wiki, weakref.WeakSet()).add(conn)
+        if racing:
+            _shut(conn, wiki)
+            return get_conn()
     # Ensure the schema once per CONNECTION, not once per process. The cache is
     # per (thread, wiki), so a process-wide memo meant any connection opened
     # after the first one skipped setup entirely -- fine while the file stays
@@ -537,12 +562,18 @@ def close_wiki_handles(wiki: str) -> int:
         plural = "a save is" if len(busy) == 1 else f"{len(busy)} saves are"
         raise WikiBusy(wiki, f"{plural} in flight on it "
                              f"(thread {busy[0].owner_thread})")
-    refused = [r for r in (_shut(c, wiki, checkpoint=True) for c in live) if r]
+    try:
+        refused = [r for r in (_shut(c, wiki, checkpoint=True) for c in live)
+                   if r]
+    finally:
+        # Every handle that got closed must not be found in its owner's cache
+        # and used, and that holds whether or not a later one refused: a
+        # half-done close with a matching epoch would hand some thread a closed
+        # connection. The epoch is what each thread checks, so it moves here,
+        # on the way out, either way.
+        invalidate_connections()
     if refused:
         raise WikiBusy(wiki, "; ".join(refused))
-    # Every handle that was open is closed, so the thread that owned it must not
-    # find it in its own cache and use it. The epoch is what each thread checks.
-    invalidate_connections()
     return len(live)
 
 
@@ -564,6 +595,34 @@ def _await_move(wiki: str) -> bool:
             raise WikiBusy(wiki, f"its files have been moving for more than "
                                  f"{_MOVE_WAIT_SECONDS:.0f}s")
         return True
+
+
+def _settled_wiki() -> str:
+    """The active wiki, once its files are not in the middle of moving.
+
+    Two things can be true after a wait, and neither may be glossed over. The
+    wiki may now live at a different address — so the name is resolved *again*,
+    because SQLite creates an empty database for a path that is not there and
+    opening the old name would quietly manufacture an empty wiki. Or the slug
+    the caller explicitly asked for may be gone, renamed or deleted — and then
+    `active_wiki()`'s fallback to the registry default would put this caller's
+    write into someone else's wiki, which rule 4 says is the bug and refusing is
+    the fix (`WikiMoved`). A caller that named no wiki is not refused: the
+    default is what it asked for in the first place.
+    """
+    asked = current_wiki.get()
+    wiki = active_wiki()
+    if not _await_move(wiki):
+        return wiki
+    if asked and not _wikis().exists(asked):
+        raise WikiMoved(asked)
+    return active_wiki()
+
+
+def _wikis():
+    from . import wikis
+
+    return wikis
 
 
 @contextlib.contextmanager
@@ -706,10 +765,16 @@ def transaction():
     mark = len(state.pending)
     conn.execute("BEGIN IMMEDIATE" if outer else f"SAVEPOINT {name}")
     state.depth += 1
+    # The depth comes back down only once the COMMIT or ROLLBACK has actually
+    # been issued, never before. It used to drop first, which left a window
+    # where this connection looked idle while its transaction was still open —
+    # and `close_wiki_handles` reads exactly this to decide whether a save is in
+    # flight. A move landing in that window would have closed the connection
+    # between the last statement and its COMMIT, rolling the save back with
+    # nobody told: the one thing that refusal exists to prevent.
     try:
         yield conn
     except BaseException:
-        state.depth -= 1
         del state.pending[mark:]        # dropped with the work they belonged to
         try:
             if outer:
@@ -719,10 +784,14 @@ def transaction():
                 conn.execute(f"RELEASE {name}")
         except Exception:
             pass   # a failing rollback must not mask what actually went wrong
+        finally:
+            state.depth -= 1
         raise
-    state.depth -= 1
     if not outer:
-        conn.execute(f"RELEASE {name}")
+        try:
+            conn.execute(f"RELEASE {name}")
+        finally:
+            state.depth -= 1
         return
     try:
         conn.execute("COMMIT")
@@ -735,7 +804,9 @@ def transaction():
             conn.execute("ROLLBACK")
         except Exception:
             pass
+        state.depth -= 1
         raise
+    state.depth -= 1
     pending, state.pending = state.pending, []
     for fn, args, kwargs in pending:
         fn(*args, **kwargs)

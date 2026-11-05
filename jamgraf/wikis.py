@@ -305,26 +305,44 @@ def delete_wiki(slug: str) -> bool:
     Unlinking is also the operation Windows refuses outright while a handle is
     open, which is the same reason stated by the other OS.
     """
+    label = name_of(slug)
     try:
         with db.file_move(slug, vanishing=True):
-            with _lock:
-                reg = _load()
-                before = len(reg["wikis"])
-                reg["wikis"] = [w for w in reg["wikis"] if w["slug"] != slug]
-                if len(reg["wikis"]) == before:
-                    return False
-                if reg.get("default") == slug:
-                    reg["default"] = (reg["wikis"][0]["slug"]
-                                      if reg["wikis"] else None)
-                _save(reg)
+            if not any(w["slug"] == slug for w in _load()["wikis"]):
+                return False
+            # **Files first, registry second**, and the order is the whole
+            # point. Unlinking is the step that can be refused — on Windows
+            # while anything holds a handle, anywhere on a read-only volume —
+            # and the two orders fail very differently. Deregistering first
+            # leaves files nobody is tracking: `create_wiki` would hand the
+            # same slug to a new wiki, `get_conn` would open the file still
+            # sitting there, and a wiki the user deleted would come back
+            # wearing a new name's label. Removing the files first leaves at
+            # worst a *registered* wiki whose file has gone, which rule 4
+            # already handles out loud — it says so on screen and in the log,
+            # and the file is never guessed about.
             for suffix in ("", "-wal", "-shm"):
                 f = Path(str(db_path(slug)) + suffix)
                 if f.exists():
                     f.unlink()
+            with _lock:
+                reg = _load()
+                reg["wikis"] = [w for w in reg["wikis"] if w["slug"] != slug]
+                if reg.get("default") == slug:
+                    reg["default"] = (reg["wikis"][0]["slug"]
+                                      if reg["wikis"] else None)
+                _save(reg)
     except db.WikiBusy as exc:
         raise ValueError(
-            f"'{name_of(slug)}' is being written to right now — {exc.reason}. "
+            f"'{label}' is being written to right now — {exc.reason}. "
             f"Nothing was deleted; try again in a moment.") from exc
+    except OSError as exc:
+        # Still registered, so it is still a wiki — with however many of its
+        # files are left. Say that rather than report a clean delete.
+        raise ValueError(
+            f"'{label}' could not be deleted: {exc.strerror or exc}. It is "
+            f"still listed at /{slug}; close anything using it and try "
+            f"again.") from exc
     return True
 
 

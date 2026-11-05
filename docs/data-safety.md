@@ -600,6 +600,27 @@ knows SQLite (rule 2) — `wikis.py` just wraps its file operations in
   at the old address — a rename that silently empties the wiki, the worst
   outcome available here. `db.file_move` holds those readers for the few
   milliseconds the move takes, and they resolve the address again afterwards.
+  What they get if the address they asked for has *gone* is the second half, and
+  rule 4 decides it: `active_wiki()` falls back to the registry default for a
+  slug it cannot find, so carrying on would put that request into whichever wiki
+  happens to be default — someone else's content, silently. It is refused
+  (`db.WikiMoved`). A caller that named no wiki is not refused; the default is
+  what it asked for. A connection opened *just* as a move starts is dropped and
+  reopened rather than escaping the snapshot `close_wiki_handles` took, since
+  opening a database is far too slow to hold a lock across.
+
+Two orderings turned out to matter, both of them only because the step can now
+fail. **A delete removes the files before it deregisters the wiki**: the other
+way round leaves a file nobody is tracking, so `create_wiki` hands the same slug
+to the next wiki of that name, `get_conn` opens the file still sitting there, and
+a wiki the user deleted comes back wearing the new one's label. Files first
+leaves at worst a *registered* wiki whose file has gone, which section 2 above
+already handles out loud. **A transaction's depth comes down only once its
+COMMIT has been issued**, never before: `close_wiki_handles` reads that depth to
+decide a save is in flight, and the old ordering left a window where a save that
+had written everything and committed nothing looked idle — a move landing there
+would have closed the connection between the two and rolled the save back with
+nobody told, which is the exact thing the refusal exists to prevent.
 
 A rename can also be refused **part-way**, which is new ground: three files
 move one at a time, and a scheduled backup holds a handle on a wiki for the

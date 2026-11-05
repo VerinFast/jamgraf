@@ -499,7 +499,9 @@ two in parity (same substance, different voice) whenever you change either.
     read is a 500, and a packaged app has no console to read it in. Readers are **held off** for the few
     milliseconds of the move, because the instant between the close and the
     registry write is one where SQLite would *create* an empty database at the
-    old path — a rename that silently empties the wiki. And how much has to
+    old path — a rename that silently empties the wiki; and a reader whose
+    address has *gone* by then is refused (`db.WikiMoved`) rather than handed
+    the registry default, which rule 4 calls the bug. And how much has to
     close is a property of the OS, written down once as
     `db.OPEN_FILES_CAN_MOVE`: on POSIX a stale handle across a *rename* follows
     the file and its write arrives in the right wiki, so it is left alone, while
@@ -512,6 +514,14 @@ two in parity (same substance, different voice) whenever you change either.
     `as_if_windows` fixture makes macOS enforce the Windows rule so none of this
     can regress unseen — it refuses `os.rename`/`os.unlink` on any path this
     process still holds a descriptor on.
+    Two orderings are part of the rule because the steps can now fail. A
+    **delete removes the files before it deregisters the wiki**: the other way
+    round leaves a file nobody tracks, so the slug is handed to the next wiki of
+    that name and a deleted wiki comes back wearing its label, where files-first
+    leaves at worst a registered wiki whose file has gone — which rule 4 already
+    reports. And a **transaction's depth comes down only after its COMMIT is
+    issued**, since `close_wiki_handles` reads that depth: dropping it first left
+    a save that had written everything and committed nothing looking idle.
 
 ## Before committing
 
