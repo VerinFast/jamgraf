@@ -19,9 +19,11 @@ two in parity (same substance, different voice) whenever you change either.
   elements, the wiki registry, hybrid retrieval).
 - `jamgraf/db.py` — infrastructure chokepoint: SQLite connection cache, schema,
   FTS5, sqlite-vec load, apsw/stdlib backend shim, low-level settings SQL, the
-  **transaction seam** (`transaction()` / `after_commit()`, rule 6), and
-  the **damaged-file judgement** (`unreadable_reason` / `WikiUnreadable`) that
-  keeps one bad wiki from taking the app down (rule 4).
+  **transaction seam** (`transaction()` / `after_commit()`, rule 6), the
+  **damaged-file judgement** (`unreadable_reason` / `WikiUnreadable`) that
+  keeps one bad wiki from taking the app down (rule 4), and the **file-move
+  seam** (`file_move` / `close_wiki_handles` / `OPEN_FILES_CAN_MOVE`) that is
+  the only thing allowed to know whether this OS will move an open file.
 - `jamgraf/mcp_server.py` — FastMCP tool surface; shares `store`/`rag` with the API.
 - `jamgraf/collab.py` — CRDT rooms + the debounced snapshot flusher.
 - `jamgraf/metaschema.py` — the metadata declaration a template may carry
@@ -112,7 +114,10 @@ two in parity (same substance, different voice) whenever you change either.
    SQL and no cursor use (`get_conn()`/`.execute()`/`.fetch*()`) in `api.py`** —
    `tests/test_repository_chokepoint.py` fails the build if either reappears.
 2. **All SQL lives behind the repository.** `store.py` (and `elements`/`wikis`/
-   `rag`) own the domain SQL; `db.py` is the only module that knows SQLite. Route
+   `rag`) own the domain SQL; `db.py` is the only module that knows SQLite —
+   including the fact that **Windows will not rename or delete a file while a
+   handle is open on it**, which is why `wikis.py` moves a wiki's files inside
+   `db.file_move(slug)` and never counts handles itself (see rule 14). Route
    settings access goes through `store.get_setting/set_setting/all_settings`, not
    `db.*`. Infrastructure-internal callers (embeddings, imagegen, ai, mcp_server)
    may call `db` directly — they already sit below the repository.
@@ -469,6 +474,63 @@ two in parity (same substance, different voice) whenever you change either.
     and `tests/test_rename_migration.py` guard all of it; each guard fails when
     removed, and the build's second smoke test boots the bundle through the old
     executable name with the old env vars on every build.
+
+14. **A wiki's files only move with every handle on them accounted for.**
+    POSIX renames and unlinks a directory entry, so an open handle keeps working
+    on the same inode and a move needs nobody's cooperation. Windows refuses
+    while any handle is open anywhere in the process (`WinError 32`), and SQLite
+    holds three — the `.db`, the `-wal` and the `-shm`. So renaming or deleting
+    a wiki went through `db.release_wiki_handles`, which **closed nothing**:
+    `_ApswConn`, the shipped backend's shim, had no `close()` at all, so every
+    `conn.close()` in `db.py` raised `AttributeError` into a
+    `suppress(Exception)`. Handles leaked on both backends; POSIX never noticed
+    and Windows could not rename a wiki at all.
+    `db.file_move(slug)` is now the only way those files move, and four things
+    in it are load-bearing. A **cross-thread** close exists at all
+    (`close_wiki_handles`, over a weak-referenced registry beside the
+    per-`(thread, wiki)` cache — weak, or a retired anyio worker thread's
+    connections are pinned for the life of the process). A save in flight is
+    **refused, never forced**: a connection inside `transaction()` is part-way
+    through rule 6's atomic unit, so the move raises `db.WikiBusy` with nothing
+    closed and nothing moved, and a handle that will not close is reported the
+    same way, naming its thread. `wikis.py` turns that into the `ValueError`
+    every other refusal there already speaks, so `/wikis/{slug}/address` and
+    `/wikis/{slug}/delete` put it in the page's banner — a refusal nobody can
+    read is a 500, and a packaged app has no console to read it in. Readers are **held off** for the few
+    milliseconds of the move, because the instant between the close and the
+    registry write is one where SQLite would *create* an empty database at the
+    old path — a rename that silently empties the wiki; and a reader whose
+    address has *gone* by then is refused (`db.WikiMoved`) rather than handed
+    the registry default, which rule 4 calls the bug. And how much has to
+    close is a property of the OS, written down once as
+    `db.OPEN_FILES_CAN_MOVE`: on POSIX a stale handle across a *rename* follows
+    the file and its write arrives in the right wiki, so it is left alone, while
+    a *deletion* closes them everywhere because an inode with no name eats the
+    write in silence.
+    One property does not survive Windows and is not quietly dropped: a write in
+    flight when the address changes arrives on POSIX and **fails loudly** there.
+    What holds everywhere is that it never disappears silently and never lands
+    in another wiki. `docs/data-safety.md` question 6 records it, and the
+    `as_if_windows` fixture makes macOS enforce the Windows rule so none of this
+    can regress unseen — it refuses `os.rename`/`os.unlink` on any path this
+    process still holds a descriptor on. What closing ours cannot fix is named
+    rather than papered over: a handle in the **MCP server's own process** is
+    beyond reach, so the refusal says so (`db.handles_elsewhere_note`).
+    Three pieces of bookkeeping come with it: a rename **re-files** the handles
+    it leaves open (`_rekey_handles`), or a later delete looks under the new
+    slug, finds nothing and leaves one open on a file it unlinks; the cache
+    epoch is **per wiki**, because one process-wide counter meant moving any
+    wiki retired a handle a save on another wiki was holding; and saving a wiki
+    to a file **re-checks its address** between the by-path snapshot and the
+    by-slug image query, or the zip is one wiki's pages with another's pictures.
+    Two orderings are part of the rule because the steps can now fail. A
+    **delete removes the files before it deregisters the wiki**: the other way
+    round leaves a file nobody tracks, so the slug is handed to the next wiki of
+    that name and a deleted wiki comes back wearing its label, where files-first
+    leaves at worst a registered wiki whose file has gone — which rule 4 already
+    reports. And a **transaction's depth comes down only after its COMMIT is
+    issued**, since `close_wiki_handles` reads that depth: dropping it first left
+    a save that had written everything and committed nothing looking idle.
 
 ## Before committing
 
