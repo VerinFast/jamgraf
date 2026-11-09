@@ -8,4 +8,4 @@ pytest>=9.1.1
 # anyio is imported directly by tests that drive async MCP dispatch. It arrives
 # transitively via starlette/httpx too, but a test dependency should be declared
 # where it is used rather than relied on as somebody else's transitive.
-anyio>=4.15.1
+anyio>=4.16.0
