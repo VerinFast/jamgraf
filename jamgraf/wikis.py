@@ -180,17 +180,19 @@ def change_slug(slug: str, new_slug: str) -> str:
     touch, so a renamed wiki still pushes and pulls where it always did.
 
     Four things have to happen together, and the order is the whole job.
-    **This thread's handle is checkpointed and closed first**, so the `-wal`
-    can be dropped rather than left beside a file that no longer matches it.
-    **The file moves before the registry does**, because a registry that names
-    a file which is not there yet would have the next reader create an empty
-    one in its place (`db.get_conn`) — a rename that silently empties the wiki
-    is the worst outcome available here, so a failure to record the move puts
-    the file back instead. **Every cached handle is retired**
-    (`db.invalidate_connections`): they are per (thread, wiki) and a stale one
-    follows the renamed file, so writes for the old name would land in the
-    renamed wiki. And **the caller releases the CRDT rooms first** — see
-    `collab.release_wiki`, which cannot be done from here because it is async.
+    **The handles that have to close are closed first** — always this thread's,
+    so the `-wal` is checkpointed rather than left beside a file that no longer
+    matches it, and every other thread's where the OS will not move an open
+    file. **The file moves before the registry does**, because a registry that
+    names a file which is not there yet would have the next reader create an
+    empty one in its place (`db.get_conn`) — a rename that silently empties the
+    wiki is the worst outcome available here, so a failure to record the move
+    puts the file back instead. **Every cached handle is retired** and any left
+    open is re-filed under the new slug: they are per (thread, wiki) and a stale
+    one follows the renamed file, so writes for the old name would land in the
+    renamed wiki. All three are `db.file_move`'s, not this function's. And **the
+    caller releases the CRDT rooms first** — see `collab.release_wiki`, which
+    cannot be done from here because it is async.
 
     Refused before anything moves, and before the caller takes the editors
     down: see `plan_slug_change`.
@@ -214,50 +216,135 @@ def change_slug(slug: str, new_slug: str) -> str:
         return slug
     src, dest = db_path(slug), db_path(target)
 
-    # Checkpoint and drop our own handle first: it empties the WAL, so the set
-    # being moved is as small and as self-consistent as it can be made.
-    db.release_wiki_handles(slug)
+    # `db.file_move` owns everything SQLite and the OS have to say about moving
+    # these three files: it checkpoints and closes the handles that have to go,
+    # holds readers off for the duration so none of them can have an empty
+    # database created at the old path, and retires every cached handle on the
+    # way out. It refuses with `db.WikiBusy` — nothing closed, nothing moved —
+    # if a save is in flight. How many handles it has to close is a property of
+    # the platform, not of this function: see `db.OPEN_FILES_CAN_MOVE`.
     moved: list[tuple[Path, Path]] = []
-    # Sidecars before the database. Nothing can open the new name until the
-    # registry names it, below, but the ordering costs nothing and means there
-    # is never an instant where a database is visible without its log.
-    for suffix in ("-shm", "-wal", ""):
-        a, b = Path(str(src) + suffix), Path(str(dest) + suffix)
-        if a.exists():
-            a.rename(b)
-            moved.append((a, b))
     try:
-        with _lock:
-            reg = _load()
-            for w in reg["wikis"]:
-                if w["slug"] == slug:
-                    w["slug"] = target
-            if reg.get("default") == slug:
-                reg["default"] = target
-            _save(reg)
-    except Exception:
-        for a, b in reversed(moved):
-            b.rename(a)                    # the registry still names the old one
-        raise
-    finally:
-        db.invalidate_connections()
+        with db.file_move(slug, becomes=target):
+            try:
+                # Sidecars before the database. Nothing can open the new name
+                # until the registry names it, below, but the ordering costs
+                # nothing and means there is never an instant where a database
+                # is visible without its log.
+                #
+                # The renames are inside the same `try` as the registry write
+                # for a reason the OS supplies: any one of them can fail, and on
+                # Windows that is a thing that actually happens — a scheduled
+                # backup holds a handle on this wiki for the seconds it takes to
+                # copy, and a rename landing in that window is refused. Rolling
+                # back only the registry would have left a wiki whose `-shm` had
+                # moved and whose database had not.
+                for suffix in ("-shm", "-wal", ""):
+                    a, b = Path(str(src) + suffix), Path(str(dest) + suffix)
+                    if a.exists():
+                        a.rename(b)
+                        moved.append((a, b))
+                with _lock:
+                    reg = _load()
+                    for w in reg["wikis"]:
+                        if w["slug"] == slug:
+                            w["slug"] = target
+                    if reg.get("default") == slug:
+                        reg["default"] = target
+                    _save(reg)
+            except Exception:
+                _put_back(moved)           # the registry still names the old one
+                raise
+    except db.WikiBusy as exc:
+        # Every other refusal this function can make is a ValueError the routes
+        # and the MCP tools already turn into a sentence on screen; a wiki that
+        # is being written to is the same kind of answer — "not now, and here is
+        # why" — so it arrives the same way rather than as a 500 nobody reads.
+        # Nothing has moved: `file_move` refuses before it closes anything.
+        raise ValueError(
+            f"'{name_of(slug)}' is being written to right now — {exc.reason}. "
+            f"Nothing was moved; try again in a moment.") from exc
+    except OSError as exc:
+        # The OS refused one of the renames. Everything is back where it was
+        # (`_put_back` says so, or raises), so this is a refusal like any other.
+        raise ValueError(
+            f"'{name_of(slug)}' could not be moved: {exc.strerror or exc}. "
+            f"It is still at /{slug} with everything in it; try again in a "
+            f"moment.{db.handles_elsewhere_note()}") from exc
     return target
 
 
+def _put_back(moved: list[tuple[Path, Path]]) -> None:
+    """Undo the renames in `moved`, newest first. Raises if any will not go back.
+
+    The registry still names the old address, so a file left at the new one is
+    not litter — it is a wiki with a piece missing. If a file cannot be put
+    back, say which: that is a state only a person can sort out, and silence
+    would leave them with a wiki that opens empty and no idea why.
+    """
+    stuck = []
+    for a, b in reversed(moved):
+        try:
+            b.rename(a)
+        except OSError:
+            stuck.append(b.name)
+    if stuck:
+        raise ValueError(
+            f"a rename failed part-way and {', '.join(stuck)} could not be put "
+            f"back. Nothing is lost, but this wiki's files are split across two "
+            f"names: close Jamgraf and rename them to match before opening it "
+            f"again.")
+
+
 def delete_wiki(slug: str) -> bool:
-    with _lock:
-        reg = _load()
-        before = len(reg["wikis"])
-        reg["wikis"] = [w for w in reg["wikis"] if w["slug"] != slug]
-        if len(reg["wikis"]) == before:
-            return False
-        if reg.get("default") == slug:
-            reg["default"] = reg["wikis"][0]["slug"] if reg["wikis"] else None
-        _save(reg)
-    for suffix in ("", "-wal", "-shm"):
-        f = Path(str(db_path(slug)) + suffix)
-        if f.exists():
-            f.unlink()
+    """Forget a wiki and remove its three files. Returns False if unregistered.
+
+    Under `db.file_move` for the same reasons a rename is, plus one of its own:
+    a handle left open on a file that has been *removed* is not stale but
+    harmless the way a renamed one is — on POSIX it keeps writing into an inode
+    with no name, so the write is simply gone with nothing anywhere saying so.
+    Closing first is what makes the next write an honest error instead.
+    Unlinking is also the operation Windows refuses outright while a handle is
+    open, which is the same reason stated by the other OS.
+    """
+    label = name_of(slug)
+    try:
+        with db.file_move(slug, vanishing=True):
+            if not any(w["slug"] == slug for w in _load()["wikis"]):
+                return False
+            # **Files first, registry second**, and the order is the whole
+            # point. Unlinking is the step that can be refused — on Windows
+            # while anything holds a handle, anywhere on a read-only volume —
+            # and the two orders fail very differently. Deregistering first
+            # leaves files nobody is tracking: `create_wiki` would hand the
+            # same slug to a new wiki, `get_conn` would open the file still
+            # sitting there, and a wiki the user deleted would come back
+            # wearing a new name's label. Removing the files first leaves at
+            # worst a *registered* wiki whose file has gone, which rule 4
+            # already handles out loud — it says so on screen and in the log,
+            # and the file is never guessed about.
+            for suffix in ("", "-wal", "-shm"):
+                f = Path(str(db_path(slug)) + suffix)
+                if f.exists():
+                    f.unlink()
+            with _lock:
+                reg = _load()
+                reg["wikis"] = [w for w in reg["wikis"] if w["slug"] != slug]
+                if reg.get("default") == slug:
+                    reg["default"] = (reg["wikis"][0]["slug"]
+                                      if reg["wikis"] else None)
+                _save(reg)
+    except db.WikiBusy as exc:
+        raise ValueError(
+            f"'{label}' is being written to right now — {exc.reason}. "
+            f"Nothing was deleted; try again in a moment.") from exc
+    except OSError as exc:
+        # Still registered, so it is still a wiki — with however many of its
+        # files are left. Say that rather than report a clean delete.
+        raise ValueError(
+            f"'{label}' could not be deleted: {exc.strerror or exc}. It is "
+            f"still listed at /{slug}; close anything using it and try "
+            f"again.{db.handles_elsewhere_note()}") from exc
     return True
 
 
@@ -404,6 +491,18 @@ def export_to(slug: str, dest_path: str) -> str:
 
     token = db.current_wiki.set(slug)
     try:
+        # The database went out through `backup_db`, which opens the file by
+        # path; the images come through `get_conn`, which resolves a *slug*. If
+        # this wiki's address changed between the two, `db.active_wiki()` falls
+        # back to the registry default for a slug it no longer knows — and the
+        # export would be one wiki's pages zipped up with another wiki's
+        # pictures, with nothing saying so. Check, rather than hand that to
+        # someone as a backup of their wiki.
+        if not exists(slug):
+            raise ValueError(
+                f"the wiki '{slug}' was renamed or deleted while it was being "
+                f"saved, so nothing was written. Save it again at its new "
+                f"address.")
         media = db.get_conn().execute(
             "SELECT id, filename, data FROM images").fetchall()
     finally:
@@ -896,7 +995,12 @@ def ensure_initialized() -> None:
         wdir = _wikis_dir()
         wikis: list[dict] = []
 
-        # Migrate the pre-multi-wiki database into "main", if present.
+        # Migrate the pre-multi-wiki database into "main", if present. No
+        # `db.file_move` here, and not an oversight: the connection cache is
+        # keyed by wiki slug and `get_conn` only ever opens `db_path(slug)`, so
+        # nothing in this process can have the legacy single-database file open
+        # — there is no slug that names it. This also runs before any wiki is
+        # registered, so there is no reader to hold off either.
         legacy = config.DB_PATH
         if legacy.exists():
             for suffix in ("", "-wal", "-shm"):

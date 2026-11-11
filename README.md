@@ -260,6 +260,16 @@ a cache that can be rebuilt from the markdown at any time, so it is refreshed ju
 after the save commits rather than while it holds the write lock. The reasoning
 and the measurements are in [docs/data-safety.md](docs/data-safety.md).
 
+Renaming or deleting a wiki moves that wiki's three files, and that is the one
+place the operating system has an opinion: Windows will not rename or delete a
+file while anything still has it open, where macOS and Linux will. So the move
+closes the handles it has to close first, **refuses** rather than closing one out
+from under a save that is part-way through, and holds readers for the
+milliseconds it takes — long enough that nobody can have an empty database
+created at the address the wiki has just left. The one durability property that
+genuinely differs between the two platforms is named in
+[docs/data-safety.md](docs/data-safety.md#6-moving-a-wikis-files-where-the-os-will-not-move-an-open-file).
+
 Because the persisted state is a genuine CRDT, Jamgraf can **export** a page as a
 snapshot (full Y.Doc + a content-addressed image sidecar) or a changelog (updates
 since a peer's state vector), and **import** the same from a peer — the local half
