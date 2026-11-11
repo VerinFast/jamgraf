@@ -228,3 +228,48 @@ def test_rendering_never_rewrites_the_source():
     before = md
     render.render_markdown(md)
     assert md == before
+
+
+# --- Wikilinks must not be eaten by linkify ----------------------------------
+#
+# linkify turns any domain-shaped word into an external link, and .md/.py/.sh
+# are real TLDs — so [[Soul.md]] came out as [[<a href="http://Soul.md">…]], and
+# the post-render wikilink pass skipped that anchor, leaving the link broken.
+
+def test_wikilink_with_filename_title_is_not_linkified():
+    for src, href in [
+        ("[[Soul.md]]", "/wiki/soulmd"),
+        ("see [[Edit an agent's Soul.md]] now", "/wiki/edit-an-agents-soulmd"),
+        ("[[main.py#Entry point]]", "/wiki/mainpy#entry-point"),
+        ("| A |\n|---|\n| [[Agent.md]] |", "/wiki/agentmd"),
+    ]:
+        html = render.render_markdown(src)
+        assert f'href="{href}"' in html, src
+        assert "http://" not in html and 'class="ext"' not in html, src
+        assert "[[" not in html, src
+
+
+def test_wikilink_label_is_escaped_not_injected():
+    html = render.render_markdown("[[Page|<img src=x onerror=alert(1)>]]")
+    assert "<img" not in html
+
+
+def test_wikilink_to_a_url_stays_internal():
+    for src in ("[[https://evil.example]]", "[[javascript:alert(1)]]"):
+        html = render.render_markdown(src)
+        assert 'href="/wiki/' in html, src
+        assert 'href="https://' not in html and 'href="javascript' not in html, src
+
+
+def test_bare_domain_text_still_linkifies():
+    html = render.render_markdown("docs at example.com")
+    assert 'href="http://example.com"' in html
+
+
+def test_escapes_and_entities_in_a_wikilink_still_decode():
+    """Hiding the span from linkify also hides it from the escape and entity
+    rules, so it decodes them itself — the link reads and resolves as before."""
+    html = render.render_markdown(r"[[A\_B]]")
+    assert 'href="/wiki/a-b">A_B</a>' in html
+    html = render.render_markdown("[[Salt &amp; Pepper]]")
+    assert 'href="/wiki/salt-pepper">Salt &amp; Pepper</a>' in html
