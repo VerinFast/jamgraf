@@ -54,7 +54,7 @@ def _declared_at_rest(css: str, selector_part: str, prop: str) -> list[str]:
 def test_the_themes_only_swap_variables():
     """The premise of every check below."""
     for name in ("dark.css", "sepia.css"):
-        body = (THEMES / name).read_text()
+        body = (THEMES / name).read_text(encoding="utf-8")
         assert '@import url("default.css")' in body, f"{name} must layer on default"
 
 
@@ -63,7 +63,7 @@ def test_article_controls_take_their_colour_from_a_variable():
 
     This is the exact "black on black" the speaker button shipped with.
     """
-    css = (THEMES / "default.css").read_text()
+    css = (THEMES / "default.css").read_text(encoding="utf-8")
     for control in (".tts-btn", ".section-edit", ".header-anchor",
                     # The article's link to its own history (issue #73): the
                     # app's undo, so invisible-on-dark is not a cosmetic bug.
@@ -84,7 +84,7 @@ def test_the_lead_controls_are_revealed_without_a_heading():
     each child carries its own ``opacity:0``, which is why the first fix to this
     bug changed nothing on screen.
     """
-    css = (THEMES / "default.css").read_text()
+    css = (THEMES / "default.css").read_text(encoding="utf-8")
     revealing = [
         (sel, decls) for sel, decls in _blocks(css)
         if ".lead-tools" in sel
@@ -115,7 +115,7 @@ MENU_JS = None
 def _menu_js() -> str:
     global MENU_JS
     if MENU_JS is None:
-        MENU_JS = (TEMPLATES / "base.html").read_text()
+        MENU_JS = (TEMPLATES / "base.html").read_text(encoding="utf-8")
     return MENU_JS
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from jamgraf import db, store
 
-API_SRC = (Path(__file__).resolve().parent.parent / "jamgraf" / "api.py").read_text()
+API_SRC = (Path(__file__).resolve().parent.parent / "jamgraf" / "api.py").read_text(encoding="utf-8")
 
 # SQL verbs and the cursor accessor that must never appear in the route module.
 _SQL = re.compile(r"\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b")

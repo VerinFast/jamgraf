@@ -687,7 +687,7 @@ def test_a_torn_registry_write_cannot_lose_a_wiki(wiki):
         store.create_page("Nana's Pie", "the only copy")
     finally:
         db.current_wiki.reset(tok)
-    before = (config.DATA_DIR / "wikis.json").read_text()
+    before = (config.DATA_DIR / "wikis.json").read_text(encoding="utf-8")
 
     real_replace = wikis.os.replace
 
@@ -701,7 +701,7 @@ def test_a_torn_registry_write_cannot_lose_a_wiki(wiki):
     finally:
         wikis.os.replace = real_replace
 
-    raw = (config.DATA_DIR / "wikis.json").read_text()
+    raw = (config.DATA_DIR / "wikis.json").read_text(encoding="utf-8")
     assert raw == before
     assert json.loads(raw)                       # still parses
     assert wikis.exists(slug)
@@ -713,7 +713,7 @@ def test_a_torn_registry_write_cannot_lose_a_wiki(wiki):
 def test_a_torn_app_config_write_cannot_turn_backups_off(wiki):
     """`app_config.json` holds whether backups run at all — same rename rule."""
     appconfig.set("backup_keep", 4)
-    before = (config.DATA_DIR / "app_config.json").read_text()
+    before = (config.DATA_DIR / "app_config.json").read_text(encoding="utf-8")
 
     real_replace = appconfig.os.replace
 
@@ -727,7 +727,7 @@ def test_a_torn_app_config_write_cannot_turn_backups_off(wiki):
     finally:
         appconfig.os.replace = real_replace
 
-    assert (config.DATA_DIR / "app_config.json").read_text() == before
+    assert (config.DATA_DIR / "app_config.json").read_text(encoding="utf-8") == before
     assert backups.enabled() is True
     assert backups.keep() == 4
     assert not list(config.DATA_DIR.glob("app_config.json.tmp*"))

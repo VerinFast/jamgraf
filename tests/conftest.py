@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import sys
 import threading
 import time
 from pathlib import Path
@@ -199,6 +200,39 @@ def fake_live_http(monkeypatch):
     return install
 
 
+@pytest.fixture
+def pretend_platform(monkeypatch):
+    """Answer one module's ``sys.platform`` differently, and nothing else.
+
+    Platform-dependent behaviour has to be testable from one machine, and the
+    obvious way — ``monkeypatch.setattr(mod.sys, "platform", ...)`` — is a trap:
+    ``mod.sys`` *is* the real :mod:`sys`, so that rewrites it for the whole
+    interpreter. ``shutil.which`` then takes its Windows branch and reaches for
+    ``_winapi``, which a Mac has not got, and tests fail for a reason that has
+    nothing to do with what they were checking.
+
+    This swaps the module's *reference* to sys for a stand-in that answers
+    ``platform`` and delegates everything else, so the blast radius is the one
+    module named.
+
+        pretend_platform("win32", capabilities, remedies)
+    """
+    class _Sys:
+        def __init__(self, platform):
+            self.platform = platform
+
+        def __getattr__(self, name):
+            return getattr(sys, name)
+
+    def pretend(platform: str, *modules):
+        stand_in = _Sys(platform)
+        for module in modules:
+            monkeypatch.setattr(module, "sys", stand_in)
+        return stand_in
+
+    return pretend
+
+
 # --- "this OS will not move an open file" ------------------------------------
 #
 # Windows refuses `os.rename` and `os.unlink` on a file any handle in any
@@ -288,5 +322,3 @@ def as_if_windows():
         pytest.skip("the /dev/fd check this leans on is POSIX-only")
     with windows_file_rules():
         yield
-
-

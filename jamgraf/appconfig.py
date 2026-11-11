@@ -21,7 +21,7 @@ def _path():
 
 def _load() -> dict:
     try:
-        return json.loads(_path().read_text())
+        return json.loads(_path().read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -43,7 +43,7 @@ def set(key: str, value) -> None:
         path = _path()
         tmp = path.with_name(path.name + f".tmp{os.getpid()}")
         try:
-            tmp.write_text(json.dumps(data, indent=2))
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             os.replace(tmp, path)
         finally:
             tmp.unlink(missing_ok=True)

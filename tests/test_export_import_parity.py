@@ -70,7 +70,7 @@ def _exported_names() -> set[tuple[str, str]]:
     for path in sorted(_PACKAGE.rglob("*.py")):
         if "vendor" in path.parts:
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
                     and node.name.startswith("export"):
                 found.add((path.stem, node.name))

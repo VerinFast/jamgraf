@@ -213,6 +213,42 @@ def bundle_path() -> Path | None:
     return None
 
 
+def install_kind() -> str:
+    """How this copy of Jamgraf got here: "bundle", "package" or "unknown".
+
+    This decides what "update" even means, which is why it lives beside the
+    updater rather than in a view: a signed .app swaps itself, a pip install is
+    its package manager's to update, and a checkout is git's. Telling someone to
+    run the wrong one of those is worse than saying nothing, so a shape we do
+    not recognise is reported as unknown rather than guessed at.
+    """
+    if bundle_path() is not None:
+        return "bundle"
+    here = Path(__file__).resolve().parent
+    if (here.parent / "pyproject.toml").is_file():
+        return "checkout"
+    if any(p.name in ("site-packages", "dist-packages") for p in here.parents):
+        return "package"
+    return "unknown"
+
+
+def _no_bundle_reason() -> str:
+    """Why there is nothing to swap, in terms of how this copy was installed.
+
+    Every branch keeps the words "packaged .app": the refusal is the same one
+    (rule 8 -- no verified bundle, no update), and only the next step differs.
+    """
+    kind = install_kind()
+    if kind == "package":
+        return ("not running from a packaged .app: Jamgraf is installed here as "
+                "a Python package, so updates come from whichever tool "
+                "installed it")
+    if kind == "checkout":
+        return ("not running from a packaged .app: this is a source checkout, "
+                "so updates come from git")
+    return "not running from a packaged .app"
+
+
 def can_update() -> tuple[bool, str]:
     """Whether this install is updatable, and why not when it isn't."""
     if not _pinned_keys():
@@ -220,7 +256,7 @@ def can_update() -> tuple[bool, str]:
                        "(see jamgraf/updater.py)")
     bundle = bundle_path()
     if bundle is None:
-        return False, "not running from a packaged .app"
+        return False, _no_bundle_reason()
     if not os.access(bundle, os.W_OK) or not os.access(bundle.parent, os.W_OK):
         return False, f"{bundle} is not writable by this user"
     return True, ""

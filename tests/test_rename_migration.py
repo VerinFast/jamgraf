@@ -84,7 +84,7 @@ def test_a_stale_old_path_never_becomes_a_fresh_empty_install(tmp_path):
     old.mkdir(parents=True, exist_ok=True)               # exactly what config.py does
 
     assert old.is_symlink()
-    assert (old / "wikis.json").read_text().startswith('{"wikis"')
+    assert (old / "wikis.json").read_text(encoding="utf-8").startswith('{"wikis"')
 
 
 def test_a_handle_opened_before_the_move_keeps_writing_to_the_moved_data(tmp_path):
@@ -248,6 +248,7 @@ class FakeKeychain:
 @pytest.fixture
 def keychain(monkeypatch):
     k = FakeKeychain()
+    monkeypatch.setattr(secretstore, "_windows", lambda: False)
     monkeypatch.setattr(secretstore, "_security", lambda: "/usr/bin/security")
     monkeypatch.setattr(subprocess, "run", k.run)
     return k
@@ -308,7 +309,7 @@ def test_an_in_place_update_is_given_its_new_name(tmp_path):
     assert new.is_dir() and not new.is_symlink()
     assert old.is_symlink() and old.resolve() == new.resolve()
     # A config naming the old path still launches: it resolves through the link.
-    assert (old / "Contents" / "MacOS" / "Jamgraf").read_text() == "binary"
+    assert (old / "Contents" / "MacOS" / "Jamgraf").read_text(encoding="utf-8") == "binary"
 
 
 def test_a_jamgraf_bundle_already_beside_it_is_left_alone(tmp_path):

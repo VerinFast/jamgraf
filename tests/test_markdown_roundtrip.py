@@ -87,15 +87,15 @@ def test_export_import_export_is_a_fixed_point(wiki, tmp_path):
     assert sorted(p.name for p in second.iterdir()) == \
         sorted(p.name for p in first.iterdir())
     for f in sorted(first.iterdir()):
-        assert (second / f.name).read_text() == f.read_text(), f.name
+        assert (second / f.name).read_text(encoding="utf-8") == f.read_text(encoding="utf-8"), f.name
 
 
 def test_structural_keys_do_not_become_page_properties(wiki, tmp_path):
     """`title:`/`parent:` are columns; left in the text they'd be infobox rows."""
     _populate()
     docs = _export(tmp_path)
-    assert "title: Navigation" in (docs / "navigation.md").read_text()
-    assert "parent: navigation" in (docs / "star-compass.md").read_text()
+    assert "title: Navigation" in (docs / "navigation.md").read_text(encoding="utf-8")
+    assert "parent: navigation" in (docs / "star-compass.md").read_text(encoding="utf-8")
 
     wikis.import_markdown(str(docs), name="Clean")
     db.current_wiki.set("clean")
@@ -360,3 +360,49 @@ def test_mcp_export_and_import_are_a_pair(wiki, tmp_path, monkeypatch):
     assert fresh["wiki"] == "sidecar"
     assert sorted(fresh["created"]) == ["hōkūleʻas-voyage", "navigation",
                                         "star-compass"]
+
+
+def test_the_export_never_relies_on_the_platform_default_encoding(wiki, tmp_path):
+    """Rule 12 is a *pair*, and `open(..., "w")` broke it on one platform only.
+
+    `_markdown_docs` reads strict UTF-8. The writer used the platform default,
+    which is UTF-8 on macOS and cp1252 on Windows — so an em dash or an emoji in
+    a page was written as something the import half then refuses, and the Mac
+    suite could not see it. Asserted by watching the call rather than by reading
+    the source: removing `encoding="utf-8"` from `wikis.export_markdown` makes
+    this go red on any platform.
+    """
+    import builtins
+
+    from jamgraf import store, wikis
+
+    store.create_page("Dash", "An em dash — and an emoji 🌋, both non-ASCII.",
+                      author="t")
+
+    opened: list[dict] = []
+    real_open = builtins.open
+
+    def watching(file, mode="r", *args, **kwargs):
+        if "b" not in mode:
+            opened.append({"file": str(file), "mode": mode,
+                           "encoding": kwargs.get("encoding")})
+        return real_open(file, mode, *args, **kwargs)
+
+    builtins.open = watching
+    try:
+        wikis.export_markdown("main", str(tmp_path / "out"))
+    finally:
+        builtins.open = real_open
+
+    writes = [o for o in opened if "w" in o["mode"]]
+    assert writes, "nothing was written"
+    for call in writes:
+        assert call["encoding"] == "utf-8", (
+            f"{call['file']} was opened without an explicit encoding, so its "
+            f"bytes depend on the platform the export happened to run on")
+
+    # And the pair still closes: what was written reads back as what went in.
+    exported = sorted((tmp_path / "out").glob("*.md"))
+    assert exported
+    text = "\n".join(p.read_text(encoding="utf-8") for p in exported)
+    assert "—" in text and "🌋" in text

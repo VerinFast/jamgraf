@@ -41,7 +41,7 @@ def _load() -> dict:
     p = _registry_path()
     if p.exists():
         try:
-            return json.loads(p.read_text())
+            return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             pass
     return {"wikis": [], "default": None}
@@ -59,7 +59,7 @@ def _save(reg: dict) -> None:
     path = _registry_path()
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
     try:
-        tmp.write_text(json.dumps(reg, indent=2))
+        tmp.write_text(json.dumps(reg, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)   # never leave a half-written twin behind
@@ -770,7 +770,13 @@ def export_markdown(slug: str, dest_dir: str) -> int:
     os.makedirs(dest_dir, exist_ok=True)
     files = _markdown_files(slug)
     for name, text in files:
-        with open(os.path.join(dest_dir, name), "w") as f:
+        # encoding is explicit because the default is the *platform's*: cp1252 on
+        # Windows, where an em dash or an emoji in a page either raises or is
+        # written as something else. `_markdown_docs` reads strict UTF-8, so
+        # without this the export half of rule 12 produced files its own import
+        # half refuses --- on one platform only, which is the kind of bug that
+        # ships.
+        with open(os.path.join(dest_dir, name), "w", encoding="utf-8") as f:
             f.write(text)
     return len(files)
 

@@ -11,7 +11,8 @@ the wire and the credential.
 
 * `jamgraf/kahala.py` — the link record and the transfers.
 * `jamgraf/kahalaauth.py` — OpenID Connect, authorization code + PKCE.
-* `jamgraf/secretstore.py` — the Keychain, and the refusal to use anything else.
+* `jamgraf/secretstore.py` — the OS credential store, and the refusal to use
+  anything else. `jamgraf/wincreds.py` is its Windows backend.
 
 ## What travels
 
@@ -125,7 +126,11 @@ app's own window on.
 
 ## Where the refresh token lives, and why not anywhere else
 
-In the **macOS Keychain**, under service `Jamgraf`, keyed by the realm's issuer.
+In the operating system's own credential store, under service `Jamgraf`, keyed
+by the realm's issuer: the **macOS Keychain**, or the **Windows Credential
+Manager** (`jamgraf/wincreds.py`). A platform with a real store gets a backend
+rather than an exception to the rule below; a platform without one refuses to
+sign in and says so. There is no file backend, not even a hidden one.
 
 The two obvious alternatives are both wrong:
 
@@ -147,7 +152,8 @@ export, mail, or commit, and a stolen copy of the data directory contains nothin
 to sign in with.
 
 It does **not** protect against code already running as you — a same-user
-process can shell out to `security` exactly as we do. That is the same trust
+process can shell out to `security`, or call `CredRead`, exactly as we do. That
+is the same trust
 boundary the rest of the app sits on (`auth.py` grants loopback callers owner
 rights), so it is not a new exposure.
 

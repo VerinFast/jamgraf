@@ -175,7 +175,7 @@ def test_logout_clears_the_pre_rename_share_cookie_too(wiki):
 
 def test_the_browser_reads_its_pre_rename_preferences():
     """Text size and rail width persist in the browser, under the old names."""
-    base = (REPO / "jamgraf" / "templates" / "base.html").read_text()
+    base = (REPO / "jamgraf" / "templates" / "base.html").read_text(encoding="utf-8")
     assert "(?:jamgraf|waikiki)_text_scale" in base
     assert "localStorage.getItem('waikiki_rail_w')" in base
     # ...and nothing writes the old names any more.
@@ -207,7 +207,7 @@ def test_links_handed_out_now_use_the_new_scheme():
 
 
 def test_the_bundle_registers_both_schemes():
-    spec = (REPO / "jamgraf.spec").read_text()
+    spec = (REPO / "jamgraf.spec").read_text(encoding="utf-8")
     m = re.search(r'"CFBundleURLSchemes":\s*\[([^\]]*)\]', spec)
     assert m and set(re.findall(r'"(\w+)"', m.group(1))) == {"jamgraf", "waikiki"}
 

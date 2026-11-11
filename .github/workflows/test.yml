@@ -5,6 +5,13 @@
 # macOS, not Linux: this ships as a macOS .app, and the dependencies that are
 # most likely to break — apsw, sqlite-vec, onnxruntime — are the ones whose
 # wheels differ by platform. Testing on the platform we ship is the point.
+#
+# And Windows, for the same reason now that `pip install jamgraf[desktop]` gives
+# a window there. This job is not symmetry: it is the *only* thing that executes
+# the Windows credential store's ctypes marshalling and the WebView2 registry
+# walk (jamgraf/wincreds.py, jamgraf/desktop/windows.py), neither of which can
+# run on a Mac. Everything above those seams is tested on every platform; below
+# them, this job is the whole of the coverage.
 name: tests
 
 on:
@@ -44,6 +51,105 @@ jobs:
           JAMGRAF_DATA: ${{ runner.temp }}/jamgraf-ci
           HF_HUB_OFFLINE: '1'
         run: python3 -m pytest -q
+
+  pytest-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements-dev.txt
+
+      # The Windows-relevant half of the suite, and this one gates. It is every
+      # test that exercises a platform seam this build added or the portable
+      # core it sits on; what it leaves out is listed in the survey job below,
+      # with the reason, because a job that claimed the whole suite passes here
+      # would be claiming something untrue.
+      - name: Run the Windows-relevant suite
+        env:
+          JAMGRAF_DATA: ${{ runner.temp }}\jamgraf-ci
+          HF_HUB_OFFLINE: '1'
+        run: >-
+          python -m pytest -q
+          tests/test_wincreds.py
+          tests/test_desktop_shell.py
+          tests/test_shellenv.py
+          tests/test_secretstore.py
+          tests/test_capabilities.py
+          tests/test_kahala_sync.py
+          tests/test_markdown_roundtrip.py
+          tests/test_export_import_parity.py
+          tests/test_mcp_tools.py
+          tests/test_store.py
+          tests/test_api.py
+          tests/test_cross_wiki_isolation.py
+          tests/test_repository_chokepoint.py
+
+      # pywebview is not in requirements.txt (the pip install must stay
+      # installable on a headless box), so the extra is installed here to prove
+      # the one thing a Windows user does first: that `jamgraf[desktop]`
+      # resolves and the window's entry point imports. Importing is as far as
+      # this goes — a runner has no interactive desktop to open a window on.
+      - name: The desktop extra resolves and imports
+        run: |
+          python -m pip install -q pywebview
+          python -c "from jamgraf.desktop import main; from jamgraf.desktop import windows; print('webview2:', windows.webview2_version()); print(windows.runtime_problem() or 'window available')"
+
+  # The rest of the suite on Windows, reported and not gating --- the honest
+  # shape of a platform that is new here. The first run of this job found 63
+  # failures: six were this build's and are fixed, two were real portability
+  # bugs in the product (the markdown export wrote in the platform's default
+  # codec, so on Windows its own importer refused the files; a concurrency test
+  # timed out on a slower runner), and the remainder are pre-existing macOS
+  # assumptions in the suite, in three groups:
+  #
+  #   * `test_release_script.py` --- drives a bash release script. Windows
+  #     resolves `bash` to the WSL stub, which is not a thing to fix: this is
+  #     macOS release tooling and will never run there.
+  #   * `test_rename_migration.py`, `test_wiki_rename.py`, parts of
+  #     `test_updater.py` --- `.app` bundles, `~/Library` paths and symlinks.
+  #     Also macOS artifacts by definition.
+  #   * `test_wiki_rename.py`, `test_data_safety.py` --- `PermissionError
+  #     [WinError 32]`: Windows will not rename or delete an open file, and
+  #     db.py's connection cache is thread-local, so a rename cannot close a
+  #     handle another thread holds. That one is a genuine product limitation on
+  #     Windows rather than a test problem, and fixing it means changing the
+  #     infrastructure chokepoint --- its own piece of work, not this one.
+  #
+  # Kept running so the number moves in the right direction and nobody has to
+  # rediscover the list.
+  pytest-windows-survey:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements-dev.txt
+      # continue-on-error on the STEP, not the job: a job-level flag still
+      # reports the check as failed, which puts a red mark on the PR for
+      # something that is informational by design. This way the job is green,
+      # the step shows what failed, and nothing claims the suite passes.
+      - name: Survey the whole suite on Windows
+        continue-on-error: true
+        env:
+          JAMGRAF_DATA: ${{ runner.temp }}\jamgraf-survey
+          HF_HUB_OFFLINE: '1'
+        run: python -m pytest -q
 
   # Guards the rule tests can't: no raw SQL or cursor use in the routes. It has a
   # test of its own, but a fast explicit signal is worth the twenty seconds.

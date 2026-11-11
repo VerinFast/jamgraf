@@ -41,7 +41,7 @@ def test_export_markdown(wiki, tmp_path):
     # The file leads with the frontmatter header that makes it restorable —
     # the title is a column, not something the body carries (rule 12; the
     # round-trip itself is `tests/test_markdown_roundtrip.py`).
-    assert (tmp_path / "docs" / "alpha.md").read_text() == \
+    assert (tmp_path / "docs" / "alpha.md").read_text(encoding="utf-8") == \
         "---\ntitle: Alpha\n---\n# Alpha\ncontent"
 
     zbytes = wikis.markdown_zip("main")

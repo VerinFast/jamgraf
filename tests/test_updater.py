@@ -324,7 +324,7 @@ def test_the_backup_stays_on_the_bundles_own_volume(signing_key, wiki, tmp_path,
     res = updater.apply_update(staged)
     assert res["ok"], res
 
-    script = (updater._updates_dir() / "swap.sh").read_text()
+    script = (updater._updates_dir() / "swap.sh").read_text(encoding="utf-8")
     bak_line = next(ln for ln in script.splitlines() if ln.startswith("BAK="))
     assert str(target.parent) in bak_line, \
         f"backup is not beside the bundle: {bak_line}"
@@ -392,3 +392,40 @@ def test_one_malformed_entry_does_not_disarm_the_rest(monkeypatch):
     assert updater.verify_signature(b"payload", good.sign(b"payload")) is True
     other = ed25519.Ed25519PrivateKey.generate()
     assert updater.verify_signature(b"payload", other.sign(b"payload")) is False
+
+
+# --- What "update" means for the way this copy was installed -------------------
+#
+# Rule 8's refusal is unchanged on every path below: no verified .app bundle, no
+# self-update. What changes is the next step a person can actually take, and
+# naming the wrong one is worse than naming none (rule 9).
+
+def test_a_pip_install_is_told_about_its_package_manager(signing_key, monkeypatch):
+    monkeypatch.setattr(updater, "install_kind", lambda: "package")
+    ok, why = updater.can_update()
+
+    assert ok is False
+    assert ".app" in why, "the refusal itself still has to be stated"
+    assert "Python package" in why
+
+
+def test_an_install_shape_we_do_not_recognise_is_not_guessed_at(
+        signing_key, monkeypatch):
+    """Telling someone to run `pip install -U` when they did not use pip sends
+    them somewhere that cannot work. Unknown stays unknown."""
+    monkeypatch.setattr(updater, "install_kind", lambda: "unknown")
+    ok, why = updater.can_update()
+
+    assert ok is False
+    assert "pip" not in why and "git" not in why
+
+
+def test_a_bundle_is_never_mistaken_for_a_package(monkeypatch, tmp_path):
+    """install_kind must answer "bundle" whenever there is one, whatever the
+    code happens to be sitting next to: the .app is the one shape that *can*
+    update itself, and missing it would turn automatic updates off."""
+    bundle = tmp_path / "Jamgraf.app"
+    bundle.mkdir()
+    monkeypatch.setattr(updater, "bundle_path", lambda: bundle)
+
+    assert updater.install_kind() == "bundle"
