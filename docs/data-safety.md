@@ -26,6 +26,7 @@ directory.
 | 3 | Restore | Works, proven on a real 55MB backup: 215 pages, 75 images, 711 versions. Backups are on by default. Documented only inside the app, and they live on the same disk as the wikis. |
 | 4 | Import paths | A part-written import is incomplete but never destructive, and re-running the same bundle finishes it exactly. **1.0 does not need staging-and-swap.** |
 | 5 | Version history | Works, and now **findable** ([#73](https://github.com/VerinFast/jamgraf/issues/73), fixed since this audit). Every article carries a line saying when it last changed and how many earlier versions are kept; it opens the history with the list showing. Two interactions, from a sentence that names the thing in plain words. |
+| 6 | Moving a wiki's files where the OS will not move an open file | Added after the audit, from Windows CI ([#108](https://github.com/VerinFast/jamgraf/pull/108)). Every `conn.close()` in `db.py` was raising `AttributeError` into a `suppress(Exception)` — the shipped apsw shim had no `close()` at all — so handles leaked on every backend. POSIX renames by directory entry and never noticed; Windows could not rename or delete a wiki at all. Fixed; one property genuinely does not survive the platform, named below. |
 
 ---
 
@@ -538,6 +539,178 @@ covers it alongside the other article controls, and the rest is pinned by
 
 ---
 
+## 6. Moving a wiki's files where the OS will not move an open file
+
+*Added after the audit, from the first Windows CI run
+([#108](https://github.com/VerinFast/jamgraf/pull/108)).*
+
+Eight tests failed on `windows-latest` with
+`PermissionError: [WinError 32] The process cannot access the file because it is
+being used by another process` — six in `tests/test_wiki_rename.py`, two in
+`tests/test_data_safety.py`. Not a test problem: renaming or deleting a wiki did
+not work on Windows.
+
+### Why POSIX hid a real bug for this long
+
+POSIX renames and unlinks a *directory entry*. An open handle keeps working on
+the same inode, so a move needs no cooperation from whoever holds one. Windows
+refuses outright: SQLite opens a database and its `-wal`/`-shm` without
+`FILE_SHARE_DELETE`, so while any handle is open anywhere in the process,
+`os.rename` and `os.unlink` on that file fail. There is no way to rename through
+SQLite's own handle either.
+
+`change_slug` did call `db.release_wiki_handles` before moving anything. It
+closed nothing. `_ApswConn` — the shim over apsw, which is the **shipped**
+backend — had no `close()` method at all, so `conn.close()` raised
+`AttributeError` straight into a `contextlib.suppress(Exception)`, in
+`release_wiki_handles` *and* in `get_conn`'s stale-handle path. Every handle
+leaked until the object happened to be garbage collected.
+
+Measured, before the fix, with `lsof` at the moment of the rename: four open
+descriptors on `main.db`, `main.db-wal` and `main.db-shm`. POSIX renamed them
+anyway, which is exactly why nothing ever reported it.
+
+### What closing them properly needs
+
+Handles are cached per `(thread, wiki)` and a thread cannot reach into another
+thread's cache, so "close every handle on this wiki" did not exist as an
+operation. Three things were added to `db.py`, which stays the only module that
+knows SQLite (rule 2) — `wikis.py` just wraps its file operations in
+`db.file_move(slug)`:
+
+* **`close_wiki_handles(wiki)`** closes every live handle in every thread, via a
+  weak-referenced registry kept alongside the per-thread cache. Weak, so a
+  retired anyio worker thread's connections are not pinned for the life of the
+  process — that would be a second leak in place of the first.
+* **A refusal, not a force.** A connection inside a managed `transaction()` is
+  part-way through a page save, whose four writes land together or not at all
+  (rule 6). Closing it from another thread would roll that back with nobody
+  told, and the saving thread would fail somewhere far from the cause. So a wiki
+  with a save in flight is refused — `db.WikiBusy`, nothing closed and nothing
+  moved — and the user tries again a moment later. A handle that will not close
+  is reported the same way, naming the thread that owns it. `wikis.py` restates
+  it as the `ValueError` its other refusals already use, so both routes put it in
+  the *Manage wikis* banner rather than raising a 500 at a packaged app with no
+  console; `/wikis/{slug}/delete` caught nothing before this, because before
+  this it had nothing to report.
+* **A barrier for readers.** Once handles really close, the instant between the
+  close and the registry write becomes dangerous: the file is not where the
+  registry says it is, and SQLite *creates* an empty database for a path that
+  does not exist. A reader arriving then would have an empty wiki manufactured
+  at the old address — a rename that silently empties the wiki, the worst
+  outcome available here. `db.file_move` holds those readers for the few
+  milliseconds the move takes, and they resolve the address again afterwards.
+  What they get if the address they asked for has *gone* is the second half, and
+  rule 4 decides it: `active_wiki()` falls back to the registry default for a
+  slug it cannot find, so carrying on would put that request into whichever wiki
+  happens to be default — someone else's content, silently. It is refused
+  (`db.WikiMoved`). A caller that named no wiki is not refused; the default is
+  what it asked for. A connection opened *just* as a move starts is dropped and
+  reopened rather than escaping the snapshot `close_wiki_handles` took, since
+  opening a database is far too slow to hold a lock across.
+
+Three more pieces of bookkeeping are part of the same job. **A rename re-files
+the handles it leaves open** (`db._rekey_handles`): on POSIX they stay open on
+purpose, pointing at the same inode, but they were *registered* under the old
+slug — so deleting the wiki later looked under the new one, found nothing, and
+left a handle open on a file it then unlinked, whose next write goes into an
+inode with no name and is gone with nothing said. **The cache epoch is per
+wiki**: it used to be one counter, so moving any wiki retired every handle in
+the process, and a store function that asks for its connection again inside its
+own `transaction()` (`_snapshot` does) was handed a different one with the BEGIN
+still open on the one it left — half a save on each connection, or, once closing
+actually worked, none. And **saving a wiki to a `.wiki` file re-checks its
+address** between the database snapshot (`db.backup_db`, by path) and the image
+query (`get_conn`, by slug): a rename finishing between the two would have
+produced a zip of one wiki's pages with another wiki's pictures, and handed it
+to someone as a backup.
+
+Two orderings turned out to matter, both of them only because the step can now
+fail. **A delete removes the files before it deregisters the wiki**: the other
+way round leaves a file nobody is tracking, so `create_wiki` hands the same slug
+to the next wiki of that name, `get_conn` opens the file still sitting there, and
+a wiki the user deleted comes back wearing the new one's label. Files first
+leaves at worst a *registered* wiki whose file has gone, which section 2 above
+already handles out loud. **A transaction's depth comes down only once its
+COMMIT has been issued**, never before: `close_wiki_handles` reads that depth to
+decide a save is in flight, and the old ordering left a window where a save that
+had written everything and committed nothing looked idle — a move landing there
+would have closed the connection between the two and rolled the save back with
+nobody told, which is the exact thing the refusal exists to prevent.
+
+A rename can also be refused **part-way**, which is new ground: three files
+move one at a time, and a scheduled backup holds a handle on a wiki for the
+seconds it takes to copy it (`db.backup_db`), so on Windows a rename landing in
+that window is refused after the first file has already gone. The registry still
+names the old address, so a file left at the new one is not litter — it is a wiki
+with a piece missing, and the next open finds a database with no log or with
+somebody else's. The renames now sit inside the same rollback as the registry
+write, and a file that cannot be put back is **named** rather than left for the
+user to discover. `test_a_rename_refused_part_way_puts_every_file_back` holds it.
+
+(Closing the last connection to a WAL database makes SQLite delete the `-wal`
+and `-shm`, so once the handles really close there is usually only the `.db`
+left to rename. The partial case is reachable where a handle is deliberately
+kept — which is the POSIX branch below.)
+
+On POSIX only this thread's handle is closed, as before. A stale handle in
+another thread follows the renamed file, so the write it is carrying arrives in
+the right wiki — strictly better than losing it, so it is left alone. A
+*deletion* closes them everywhere on both platforms: once the inode has no name
+a write through an old handle goes nowhere and nothing reports it.
+
+### The property that does not survive Windows
+
+Accepted risk 7 below — a write in flight when the address changes is not lost —
+holds on POSIX and **cannot** hold on Windows. Keeping the handle open is what
+makes the write arrive, and keeping it open is what makes the rename impossible.
+So on Windows the handle is closed and that write **fails, loudly**, on a closed
+connection; the thread that was mid-save finds out. What is still guaranteed
+everywhere is the thing that actually mattered: the write never disappears
+silently, and it never lands in a different wiki.
+`test_a_write_in_flight_when_the_address_changes_is_not_lost` states both
+outcomes and asserts the one that is never acceptable on either.
+
+### What is still true on Windows, and named
+
+* **A handle in another process is beyond reach.** `_handles` is this process's.
+  The MCP server is a separate one with a connection cache of its own, and a
+  single open handle anywhere is enough for Windows to refuse a rename or an
+  unlink — so closing all of ours is necessary and not sufficient. There is no
+  IPC to ask it to let go, so the refusal names the likely holder instead
+  (`db.handles_elsewhere_note`) rather than leaving the user to guess which of
+  their own programs is at fault. The outcome is a clear refusal with nothing
+  moved, which is the acceptable end of this trade.
+* **An index rebuild can be cut short.** `rag.reindex_page` deletes and reinserts
+  a page's chunks outside `db.transaction()`, on purpose — it embeds, and holding
+  the write lock across that would queue every other writer (question 1) — so it
+  has no transaction depth for the refusal to see. A Windows move landing in the
+  middle closes that connection and the rebuild fails part-way. The index is a
+  cache rebuildable from the markdown, which is accepted risk 2 already; what is
+  new is only that a move can trigger it. It heals on that page's next save or a
+  rebuild from Settings, and it fails loudly rather than silently.
+* **Two renames to the same new address can still collide.** `plan_slug_change`
+  checks the destination and `file_move` serialises by *source* slug, so two
+  renames of different wikis to the same unused slug can both pass the check.
+  That is unchanged by this work — it needs a reservation on the destination —
+  and it takes two simultaneous renames, which the single local UI does not
+  readily produce.
+
+### How this is tested without Windows
+
+A leak POSIX does not care about is one macOS cannot catch, so the suite makes
+macOS care. The `as_if_windows` fixture (`tests/conftest.py`) takes the Windows
+branch through `db.file_move` **and** patches `os.rename`/`os.unlink` to refuse
+any path this process still holds an open descriptor on, matched by
+`(st_dev, st_ino)` through `/dev/fd`. It is not an emulator; it enforces the one
+property the fix has to have. Restoring the original bug — `_ApswConn.close()`
+back to a no-op — turns four tests red on macOS with the same `PermissionError`
+Windows reported. `tests/test_wiki_rename.py` also pins the refusal, the
+cross-thread close on delete, and the reader barrier, and each was confirmed by
+breaking it on purpose.
+
+---
+
 ## Accepted risks, in one place
 
 Everything below is a deliberate 1.0 position, not an oversight:
@@ -577,3 +750,8 @@ Everything below is a deliberate 1.0 position, not an oversight:
    Nothing is locked and no save pays anything for it.
    `tests/test_wiki_rename.py::test_a_write_in_flight_when_the_address_changes_is_not_lost`
    holds the line, and fails against the copy.
+   **On Windows this does not hold, and cannot** (question 6): the OS will not
+   rename a file while a handle is open, so the rename closes them and that
+   write fails on a closed connection instead of arriving. Accepted there, and
+   narrower than it sounds — the write is still never lost *silently* and still
+   never lands in another wiki.

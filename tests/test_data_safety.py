@@ -900,11 +900,22 @@ def test_yesterdays_text_is_reachable_from_the_article_page(wiki):
 # process's life. Threads still holding the old handle kept serving the old
 # content, which is why it looked like "viewing works, editing is broken".
 
-def test_a_wiki_whose_file_vanishes_is_usable_again_not_permanently_broken(wiki):
-    """Every connection sets up its own schema, whatever the process remembers."""
+def test_a_wiki_whose_file_vanishes_is_usable_again_not_permanently_broken(
+        wiki, as_if_windows):
+    """Every connection sets up its own schema, whatever the process remembers.
+
+    The file is closed before it is made to vanish, and `as_if_windows` is what
+    insists on it. A file can only *vanish* out from under a running app where
+    the OS allows an open file to be unlinked; on Windows it cannot, so a wiki's
+    file goes missing between runs or because the app let go of it, and staging
+    it any other way would be testing a thing that cannot happen. Closing first
+    is also what the app itself has to do now (`db.close_wiki_handles`), so this
+    stages the same way the product does.
+    """
     _seed("main", "text that will not survive its file")
     assert db._schema_ready                      # the memo that used to gate this
 
+    db.close_wiki_handles("main")
     for suffix in ("", "-wal", "-shm"):
         p = config.WIKIS_DIR / ("main.db" + suffix)
         p.unlink(missing_ok=True)
@@ -929,17 +940,21 @@ def test_a_wiki_whose_file_vanishes_is_usable_again_not_permanently_broken(wiki)
     assert result["pages"] == ["after"]
 
 
-def test_the_wiki_that_lost_its_file_says_so(capsys, wiki):
+def test_the_wiki_that_lost_its_file_says_so(capsys, wiki, as_if_windows):
     """Re-creating it empty is recovery, but it is not a silent one.
 
     The pages are not coming back on their own, and the wiki is about to answer
     as though it had simply always been empty — which reads as "nothing here"
     rather than "something went missing". Opening the file is the only moment
     the two can be told apart, so that is where it is said.
+
+    Closed before it vanishes, for the reason the test above gives. That also
+    replaces a `conns.pop` that forgot the handle without closing it — which is
+    precisely the bug this fix is about, left in a test.
     """
     _seed("main", "text that will not survive its file")
+    db.close_wiki_handles("main")                # closed, not merely forgotten
     (config.WIKIS_DIR / "main.db").unlink()
-    db._local.conns.pop("main", None)            # force a fresh open, same thread
 
     tok = db.current_wiki.set("main")
     try:

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 import sys
 import threading
+import weakref
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -44,7 +46,92 @@ _schema_ready: set[str] = set()
 # through it -- the fd follows the renamed file, so those writes land in the
 # renamed wiki under the old name, which is the same class of bug as serving
 # a file that has been deleted.
-_cache_epoch = 0
+#
+# **Per wiki, not process-wide.** It used to be one counter for everything, so
+# moving one wiki retired every handle in the process -- including one a save on
+# an unrelated wiki was holding. A store function that calls `get_conn()` again
+# inside its own `transaction()` (`_snapshot` does) would then be handed a
+# *different* connection, with its BEGIN still open on the one it left behind:
+# half the save on one connection and half on another, or, once closing
+# actually worked, no connection at all. A move is a fact about one wiki, so it
+# invalidates one wiki.
+_cache_epoch: dict[str, int] = {}
+
+# --- Moving a wiki's files ----------------------------------------------------
+#
+# **Can this OS move or remove a file that is still open?** POSIX renames and
+# unlinks a directory *entry*, so an open handle keeps working on the same
+# inode and the move needs no cooperation from whoever holds it. Windows
+# refuses: a handle opened without `FILE_SHARE_DELETE` — which is how SQLite
+# opens a database and its `-wal`/`-shm` — makes `os.rename` and `os.unlink`
+# fail with `WinError 32`, "the process cannot access the file because it is
+# being used by another process", for every handle in every thread of this
+# process. There is no way to rename through SQLite's own handle either.
+#
+# So on Windows a wiki's files cannot be touched until every handle on them is
+# closed, and that is a genuinely different bargain rather than the same code
+# with a flag — it is why this is a named property of the OS and not an
+# `os.name` test spelled out at each call site. `file_move()` below does as
+# little as the platform allows, and `docs/data-safety.md` question 6 records
+# what each one costs.
+OPEN_FILES_CAN_MOVE = os.name != "nt"
+
+# Every live connection, keyed by wiki, across every thread. The per-thread
+# cache above is still the fast path and still the only thing a read touches;
+# this is the registry that makes a *cross-thread* close possible at all, which
+# is what Windows needs before a file can move. Guarded by `_handles_lock`, and
+# nothing holding that lock may call `get_conn` (it wants the same lock).
+#
+# Weak references, deliberately. The owning thread's cache is what keeps a
+# connection alive; anyio worker threads are created and retired constantly, and
+# a strong reference here would keep every connection they ever opened — and its
+# file handles — alive for the life of the process. That is the leak this was
+# meant to fix, not a second one.
+_handles: "dict[str, weakref.WeakSet]" = {}
+_handles_lock = threading.Lock()
+
+# The wiki whose files are being moved right now, and the thread doing it.
+# `get_conn` waits on this: between the close and the registry write there is an
+# instant where a wiki's file is not where the registry says it is, and a reader
+# arriving then would have SQLite *create* an empty database at the old path —
+# a rename that silently empties the wiki, which is the worst outcome available
+# here. The moving thread is exempt or it would wait for itself.
+_moving: dict[str, int] = {}
+_moving_cv = threading.Condition()
+_MOVE_WAIT_SECONDS = 10.0
+# How many times a connection may lose the race with a move before we say so.
+_REOPEN_TRIES = 8
+
+
+class WikiMoved(RuntimeError):
+    """The wiki you asked for changed address while you were waiting for it.
+
+    Refusing is the only safe answer, and rule 4 is why: `active_wiki()` falls
+    back to the registry default for a slug it cannot find, so carrying on would
+    put this caller's write into whichever wiki happens to be default — someone
+    else's content, silently. A caller that waited at the move barrier named a
+    specific wiki, so it gets told rather than redirected.
+    """
+
+    def __init__(self, wiki: str):
+        super().__init__(
+            f"the wiki '{wiki}' was renamed or deleted while this request was "
+            f"waiting for it. Nothing was read or written. Open it at its new "
+            f"address, or pick it again from the list of wikis.")
+        self.wiki = wiki
+
+
+class WikiBusy(RuntimeError):
+    """A wiki's files cannot be moved right now, and nothing has been moved.
+
+    Raised instead of forcing a handle shut under a thread that is mid-write.
+    A refusal that says why is recoverable; a half-written save is not.
+    """
+
+    def __init__(self, wiki: str, reason: str):
+        super().__init__(f"{wiki}: {reason}")
+        self.wiki = wiki
+        self.reason = reason
 
 
 def active_wiki() -> str:
@@ -220,6 +307,20 @@ class _ApswConn:
         that only the outermost `transaction()` commits.
         """
 
+    def close(self):
+        """Release the OS handles on the database and its -wal/-shm.
+
+        Not optional, and not only tidiness. This shim is the shipped backend
+        and it had no `close` at all, so every `conn.close()` in this module
+        raised `AttributeError` into a `suppress(Exception)` and the handle
+        stayed open until the object happened to be collected. On POSIX that
+        was invisible — a rename or an unlink goes by directory entry, so the
+        leak never stopped anything — which is exactly why it survived: on
+        Windows the same code could not rename a wiki at all (`WinError 32`,
+        the file is in use). See `OPEN_FILES_CAN_MOVE`.
+        """
+        self._c.close()
+
     # sqlite3-style extension API, so sqlite_vec.load() works unchanged.
     def enable_load_extension(self, flag: bool):
         self._c.enableloadextension(flag)
@@ -294,15 +395,14 @@ def get_conn():
     """Connection for the active wiki, cached per (thread, wiki)."""
     from . import wikis
 
-    wiki = active_wiki()
+    wiki = _settled_wiki()
     conns = getattr(_local, "conns", None)
     if conns is None:
         conns = {}
         _local.conns = conns
     conn = conns.get(wiki)
-    if conn is not None and getattr(conn, "epoch", None) != _cache_epoch:
-        with contextlib.suppress(Exception):
-            conn.close()
+    if conn is not None and getattr(conn, "epoch", None) != _epoch_of(wiki):
+        _shut(conn, wiki)
         conns.pop(wiki, None)
         conn = None
     vanished = False
@@ -338,8 +438,27 @@ def get_conn():
             # is a bug and keeps its own traceback.
             raise _as_unreadable(exc, wiki) from exc
         _load_sqlite_vec(conn)
-        conn.epoch = _cache_epoch
-        conns[wiki] = conn
+        conn.epoch = _epoch_of(wiki)
+        conn.owner_thread = threading.current_thread().name
+        with _moving_cv:
+            # Opening a database is file I/O and schema work, far too slow to
+            # hold a lock across — so a move can begin while we are in it, and
+            # this handle would be registered *after* `close_wiki_handles` took
+            # its snapshot. On Windows that is the rename failing again, for a
+            # handle nobody could have closed. Registering and checking under
+            # the same lock the mover holds closes that: if a move has started,
+            # drop this connection and go round again.
+            racing = _moving.get(wiki) not in (None, threading.get_ident())
+            if not racing:
+                conns[wiki] = conn
+                with _handles_lock:
+                    _handles.setdefault(wiki, weakref.WeakSet()).add(conn)
+        if racing:
+            # A loop and not a recursive call: the next pass waits out the move
+            # at the barrier before it opens anything, so one more move means
+            # one more pass rather than one more stack frame.
+            _shut(conn, wiki)
+            return _reopen(wiki)
     # Ensure the schema once per CONNECTION, not once per process. The cache is
     # per (thread, wiki), so a process-wide memo meant any connection opened
     # after the first one skipped setup entirely -- fine while the file stays
@@ -355,7 +474,10 @@ def get_conn():
             _ensure_schema(conn)
         except WikiUnreadable:
             # Don't keep a handle on a file we can't use: if the user restores a
-            # good copy over it, the next call should open the new one.
+            # good copy over it, the next call should open the new one. Closed,
+            # not merely forgotten — on Windows a forgotten handle is still a
+            # handle, and the restore it is waiting for is a file write.
+            _shut(conn, wiki)
             conns.pop(wiki, None)
             raise
         conn.schema_ready = True
@@ -368,33 +490,269 @@ def get_conn():
     return conn
 
 
-def invalidate_connections() -> None:
-    """Retire every cached handle in every thread, at its next use.
+def _reopen(wiki: str):
+    """Ask again for a connection whose open lost a race with a move.
 
-    For a wiki whose file has moved. Closing another thread's connection from
-    here is not possible (the cache is a `threading.local`) and would not be
-    safe if it were, so each thread drops its own the next time it asks.
+    Bounded, and the bound is the point: each pass blocks at the move barrier
+    first, so the only way round again is another move starting in the gap. A
+    handful of those is contention; a hundred is something wrong, and saying so
+    beats spinning (rule 4 — surface it, never guess).
     """
-    global _cache_epoch
-    _cache_epoch += 1
+    for _ in range(_REOPEN_TRIES):
+        conn = get_conn()
+        if conn is not None:
+            return conn
+    raise WikiBusy(wiki, f"its files moved {_REOPEN_TRIES} times while this "
+                         f"request was trying to open it")
+
+
+def _epoch_of(wiki: str) -> int:
+    return _cache_epoch.get(wiki, 0)
+
+
+def invalidate_connections(wiki: str) -> None:
+    """Retire `wiki`'s cached handles in every thread, at their next use.
+
+    For a wiki whose file has moved. A handle still open in another thread is
+    *stale*, not broken: on POSIX it follows the renamed file, so a write
+    through it lands in this wiki under its new address. What must not happen is
+    a thread going on using it for the *old* name, because that name can be
+    registered again — so each thread drops its own the next time it asks, by
+    comparing the epoch its handle was opened in against this one.
+
+    One wiki, and the argument is required for that reason: a move is a fact
+    about one wiki, and a save in flight on another must not be disturbed by it.
+    """
+    with _handles_lock:
+        _cache_epoch[wiki] = _cache_epoch.get(wiki, 0) + 1
+
+
+def _shut(conn, wiki: str, checkpoint: bool = False) -> Optional[str]:
+    """Close one connection and forget it. Returns a reason if it would not.
+
+    A failure here is reported rather than suppressed. It used to be suppressed,
+    and the one thing it was hiding was `_ApswConn` having no `close()` at all
+    (see that shim): every handle leaked, which POSIX did not mind and Windows
+    could not work around.
+    """
+    if checkpoint:
+        # A property of the file, not of this connection: after TRUNCATE every
+        # committed frame is in the `.db` itself, so the `-wal`/`-shm` beside it
+        # can be moved or dropped without losing a transaction.
+        with contextlib.suppress(Exception):
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    reason = None
+    if not getattr(conn, "wk_closed", False):
+        try:
+            conn.close()
+            conn.wk_closed = True
+        except Exception as exc:              # noqa: BLE001 - reported, not raised
+            reason = (f"a handle opened on thread "
+                      f"{getattr(conn, 'owner_thread', '?')} would not close "
+                      f"({type(exc).__name__}: {exc})")
+    with _handles_lock:
+        live = _handles.get(wiki)
+        if live is not None:
+            live.discard(conn)
+            if not live:
+                _handles.pop(wiki, None)
+    return reason
 
 
 def release_wiki_handles(wiki: str) -> None:
-    """Checkpoint `wiki`'s WAL and close this thread's handle on it.
-
-    Called before the file is moved. The checkpoint is what makes removing the
-    old `-wal`/`-shm` safe: it is a property of the file rather than of one
-    connection, so after TRUNCATE every committed frame is in the `.db` itself.
-    """
+    """Checkpoint `wiki`'s WAL and close this thread's handle on it."""
     conns = getattr(_local, "conns", None) or {}
-    conn = conns.get(wiki)
-    if conn is None:
-        return
-    with contextlib.suppress(Exception):
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    with contextlib.suppress(Exception):
-        conn.close()
-    conns.pop(wiki, None)
+    conn = conns.pop(wiki, None)
+    if conn is not None:
+        _shut(conn, wiki, checkpoint=True)
+
+
+def close_wiki_handles(wiki: str) -> int:
+    """Close every live handle on `wiki`, in every thread. Returns how many.
+
+    This is what Windows needs before a wiki's files can be renamed or removed
+    (`OPEN_FILES_CAN_MOVE`), and it is the one operation the per-thread cache
+    cannot do on its own.
+
+    **A save in flight is a refusal, not a casualty.** A connection inside a
+    managed `transaction()` is part-way through a page save — the projection,
+    the version snapshot, the tags and the canonical Y.Doc land together or not
+    at all (rule 6). Closing it under the thread writing it would roll that back
+    with nobody told, and the thread's next statement would fail somewhere far
+    from the cause. So any wiki with a transaction open is refused, with nothing
+    closed and nothing moved; the caller reports it and the user tries again a
+    moment later. A handle that simply **will not** close is reported too, but
+    the shape is different and worth being exact about: the closes that
+    succeeded stay closed (they reopen on next use, which is routine) and the
+    *move* is abandoned, because a move that half happened is worse than one
+    that did not. The reason names the thread that owns the stubborn handle.
+
+    It does **not** wait for a transaction to finish. A save takes
+    milliseconds, but `after_commit` work can embed, and the honest answer to
+    "a write is happening" is to say so now rather than hold the UI for it.
+    """
+    with _handles_lock:
+        live = list(_handles.get(wiki, ()))
+    busy = [c for c in live if getattr(getattr(c, "_wk_tx", None), "depth", 0) > 0]
+    if busy:
+        # The reason says what is true, not what the caller was going to do:
+        # this closes handles and it has closed none, so what did not happen is
+        # the caller's sentence to write (`wikis.change_slug`, `delete_wiki`).
+        plural = "a save is" if len(busy) == 1 else f"{len(busy)} saves are"
+        raise WikiBusy(wiki, f"{plural} in flight on it (thread "
+                             f"{getattr(busy[0], 'owner_thread', '?')})")
+    try:
+        refused = [r for r in (_shut(c, wiki, checkpoint=True) for c in live)
+                   if r]
+    finally:
+        # Every handle that got closed must not be found in its owner's cache
+        # and used, and that holds whether or not a later one refused: a
+        # half-done close with a matching epoch would hand some thread a closed
+        # connection. The epoch is what each thread checks, so it moves here,
+        # on the way out, either way.
+        invalidate_connections(wiki)
+    if refused:
+        raise WikiBusy(wiki, "; ".join(refused))
+    return len(live)
+
+
+def handles_elsewhere_note() -> str:
+    """Why a move can still be refused with every handle of ours closed.
+
+    `_handles` is this process's. The MCP server is a **separate** process with
+    a connection cache of its own, and on Windows one open handle anywhere is
+    enough to refuse a rename or an unlink — so closing all of ours is necessary
+    and not always sufficient. There is no IPC to ask it to let go, so the
+    honest thing is to name the likely holder in the refusal rather than let the
+    user wonder which of their own programs is at fault.
+    """
+    if OPEN_FILES_CAN_MOVE:
+        return ""
+    return (" An agent connected over MCP, or another copy of Jamgraf, keeps "
+            "its own connection to this wiki and has to let go of it first.")
+
+
+def _await_move(wiki: str) -> bool:
+    """Block while `wiki`'s files are moving. True if we actually waited.
+
+    The thread doing the move is exempt — it has to be able to read the registry
+    and checkpoint — so this cannot deadlock on itself. A move is a handful of
+    `os.rename` calls; a wait that reaches the timeout means something is wrong
+    rather than slow, and rule 4 says surface it instead of guessing.
+    """
+    def clear() -> bool:
+        return _moving.get(wiki) in (None, threading.get_ident())
+
+    with _moving_cv:
+        if clear():
+            return False
+        if not _moving_cv.wait_for(clear, _MOVE_WAIT_SECONDS):
+            raise WikiBusy(wiki, f"its files have been moving for more than "
+                                 f"{_MOVE_WAIT_SECONDS:.0f}s")
+        return True
+
+
+def _settled_wiki() -> str:
+    """The active wiki, once its files are not in the middle of moving.
+
+    Two things can be true after a wait, and neither may be glossed over. The
+    wiki may now live at a different address — so the name is resolved *again*,
+    because SQLite creates an empty database for a path that is not there and
+    opening the old name would quietly manufacture an empty wiki. Or the slug
+    the caller explicitly asked for may be gone, renamed or deleted — and then
+    `active_wiki()`'s fallback to the registry default would put this caller's
+    write into someone else's wiki, which rule 4 says is the bug and refusing is
+    the fix (`WikiMoved`). A caller that named no wiki is not refused: the
+    default is what it asked for in the first place.
+    """
+    asked = current_wiki.get()
+    wiki = active_wiki()
+    if not _await_move(wiki):
+        return wiki
+    if asked and not _wikis().exists(asked):
+        raise WikiMoved(asked)
+    return active_wiki()
+
+
+def _wikis():
+    from . import wikis
+
+    return wikis
+
+
+def _rekey_handles(old: str, new: str) -> None:
+    """Follow a renamed wiki's still-open handles to its new slug.
+
+    On POSIX a handle another thread cached before the move is left open on
+    purpose: it points at the same inode, so the write it is carrying arrives in
+    this wiki under its new address. But it was *registered* under the old slug,
+    and the registry is what `close_wiki_handles` reads — so deleting that wiki
+    later would have looked under the new slug, found nothing, and left the
+    handle open on a file about to be unlinked. On POSIX that write then goes
+    into an inode with no name and is gone with nothing said; on Windows the
+    unlink is refused by a handle nobody could find. Either way the fix is to
+    file them where they now live.
+    """
+    with _handles_lock:
+        live = _handles.pop(old, None)
+        if live:
+            _handles.setdefault(new, weakref.WeakSet()).update(live)
+
+
+@contextlib.contextmanager
+def file_move(wiki: str, *, vanishing: bool = False, becomes: Optional[str] = None):
+    """Hold `wiki`'s database still so its files can be renamed or removed.
+
+    Everything `db` knows about moving a wiki's files is in here, so `wikis.py`
+    renames and deletes without knowing that SQLite — or Windows — has an
+    opinion. Three things happen, and only the second depends on the platform:
+
+    * **Readers are held off** for the duration. The window matters: between the
+      close and the registry write, this wiki's file is not where the registry
+      says it is, and `get_conn` would have SQLite create an empty database at
+      the old path. Those callers wait a few milliseconds instead and then
+      re-resolve the address.
+    * **Handles are closed.** This thread's always, so the `-wal` is
+      checkpointed and the three files move as one consistent set. Every other
+      thread's when the files are `vanishing`, or where the OS requires it: on
+      POSIX a handle left open across a *rename* follows the renamed file, so
+      the write it is carrying arrives in the right wiki — strictly better than
+      losing it, so we leave it alone. Across a *removal* there is nothing good
+      left to say about it: the inode has no name, so the write goes nowhere and
+      nothing reports it, which is why `vanishing` closes them everywhere. On
+      Windows neither is on offer: rename and unlink both fail outright while a
+      handle is open.
+    * **Cached handles are retired** on the way out, whichever branch ran, so no
+      thread goes on using the old name through a handle from before the move.
+
+    `becomes` is the slug this wiki will answer to afterwards. Handles left open
+    across the move are re-filed under it on success, so a later delete can
+    still find them (`_rekey_handles`).
+
+    Raises `WikiBusy` without touching anything if a save is in flight.
+    """
+    with _moving_cv:
+        if wiki in _moving:
+            raise WikiBusy(wiki, "its files are already being moved")
+        _moving[wiki] = threading.get_ident()
+    try:
+        if vanishing or not OPEN_FILES_CAN_MOVE:
+            close_wiki_handles(wiki)
+        else:
+            release_wiki_handles(wiki)
+        yield
+    except BaseException:
+        raise                      # the files are back; the keys never changed
+    else:
+        if becomes:
+            _rekey_handles(wiki, becomes)
+    finally:
+        invalidate_connections(wiki)
+        if becomes:
+            invalidate_connections(becomes)
+        with _moving_cv:
+            _moving.pop(wiki, None)
+            _moving_cv.notify_all()
 
 
 # --- Transactions -------------------------------------------------------------
@@ -492,10 +850,16 @@ def transaction():
     mark = len(state.pending)
     conn.execute("BEGIN IMMEDIATE" if outer else f"SAVEPOINT {name}")
     state.depth += 1
+    # The depth comes back down only once the COMMIT or ROLLBACK has actually
+    # been issued, never before. It used to drop first, which left a window
+    # where this connection looked idle while its transaction was still open —
+    # and `close_wiki_handles` reads exactly this to decide whether a save is in
+    # flight. A move landing in that window would have closed the connection
+    # between the last statement and its COMMIT, rolling the save back with
+    # nobody told: the one thing that refusal exists to prevent.
     try:
         yield conn
     except BaseException:
-        state.depth -= 1
         del state.pending[mark:]        # dropped with the work they belonged to
         try:
             if outer:
@@ -505,10 +869,14 @@ def transaction():
                 conn.execute(f"RELEASE {name}")
         except Exception:
             pass   # a failing rollback must not mask what actually went wrong
+        finally:
+            state.depth -= 1
         raise
-    state.depth -= 1
     if not outer:
-        conn.execute(f"RELEASE {name}")
+        try:
+            conn.execute(f"RELEASE {name}")
+        finally:
+            state.depth -= 1
         return
     try:
         conn.execute("COMMIT")
@@ -521,7 +889,9 @@ def transaction():
             conn.execute("ROLLBACK")
         except Exception:
             pass
+        state.depth -= 1
         raise
+    state.depth -= 1
     pending, state.pending = state.pending, []
     for fn, args, kwargs in pending:
         fn(*args, **kwargs)

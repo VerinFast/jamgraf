@@ -759,7 +759,16 @@ async def wikis_change_slug(request: Request, slug: str,
 
 @app.post("/wikis/{slug}/delete")
 def wikis_delete(slug: str):
-    wikis.delete_wiki(slug)
+    """Forget a wiki and remove its files. A refusal comes back as a message.
+
+    Removing the files means closing every handle on them, which is refused
+    outright while a save is in flight — so this has a refusal to report now,
+    the same way the address route does.
+    """
+    try:
+        wikis.delete_wiki(slug)
+    except ValueError as exc:
+        return RedirectResponse(f"/wikis?error={quote(str(exc))}", status_code=303)
     return RedirectResponse("/wikis", status_code=303)
 
 
