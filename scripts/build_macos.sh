@@ -96,7 +96,12 @@ if [ ! -d "$BUILD_VENV" ]; then
     "$PYTHON" -m venv "$BUILD_VENV"
 fi
 source "$BUILD_VENV/bin/activate"
-pip install -q -r requirements.txt
+# Packages whose wheel for this Python needs a newer macOS than MACOS_FLOOR, so
+# they are compiled here against MACOSX_DEPLOYMENT_TARGET instead. caio (fastmcp
+# → py-key-value-aio → aiofile) ships its cp314 macOS wheel as macosx_26_0 only.
+# The bundle check after PyInstaller is what finds the next one.
+BUILD_FROM_SOURCE="caio"
+pip install -q --no-binary "$BUILD_FROM_SOURCE" -r requirements.txt
 pip install -q pywebview pyinstaller
 
 # A running instance must be quit BEFORE the bundle is deleted below. Rebuilding
