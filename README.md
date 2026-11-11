@@ -388,6 +388,15 @@ bash scripts/build_macos.sh
 # → dist/Jamgraf.app  (+ dist/Jamgraf-macos.zip)
 ```
 
+The app runs on **macOS 14 Sonoma or later, Apple Silicon**. The floor comes
+from onnxruntime, whose macOS wheels have needed 14 since 1.24. The build needs a
+Python from [python.org](https://www.python.org/downloads/macos/), not Homebrew:
+the interpreter is bundled, and Homebrew builds Python for the macOS on the
+machine it is installed on, so a Homebrew-built app only runs on that version or
+newer. `build_macos.sh` refuses such an interpreter, sets
+`LSMinimumSystemVersion`, and fails if any binary in the bundle needs a newer
+macOS than 14.
+
 The app is currently **unsigned**, so on first launch macOS Gatekeeper will warn:
 right-click the app → **Open** → **Open** to allow it (once). Signing/notarization
 is a later step.

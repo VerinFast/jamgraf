@@ -6,6 +6,7 @@ embeddings; PyTorch / sentence-transformers are excluded to keep the app small.
 """
 from PyInstaller.utils.hooks import collect_all
 import glob
+import os
 import sqlite_vec
 
 # Stamp the real release into the bundle. The updater compares a downloaded
@@ -115,6 +116,10 @@ app = BUNDLE(
         "LSBackgroundOnly": False,
         "CFBundleShortVersionString": JAMGRAF_VERSION,
         "CFBundleVersion": JAMGRAF_VERSION,
+        # So an older Mac refuses to open it with a clear message instead of
+        # crashing at launch. build_macos.sh sets the floor and checks every
+        # binary in the bundle against it.
+        "LSMinimumSystemVersion": os.environ.get("MACOSX_DEPLOYMENT_TARGET", "14.0"),
         # jamgraf:// deep links. Registering the scheme is what makes macOS
         # deliver a GURL Apple Event to us; jamgraf_app._install_deeplink_handler
         # receives it and jamgraf/deeplink.py decides what it's allowed to mean.

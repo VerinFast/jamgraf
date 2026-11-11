@@ -24,30 +24,61 @@ PY_FLOOR="${PY_FLOOR:-3.10}"
 PY_FLOOR_MAJOR="${PY_FLOOR%%.*}"
 PY_FLOOR_MINOR="${PY_FLOOR#*.}"
 
-# Does $1 exist, run, and clear the floor?
+# The oldest macOS the app runs on. Every Mach-O in the bundle is checked against
+# it after the build, and it lands in Info.plist as LSMinimumSystemVersion (the
+# spec reads it from MACOSX_DEPLOYMENT_TARGET), so an older Mac is told plainly
+# instead of crashing at launch. 14.0 is set by onnxruntime: every release since
+# 1.24 ships macOS 14 arm64 wheels only.
+MACOS_FLOOR="14.0"
+export MACOSX_DEPLOYMENT_TARGET="$MACOS_FLOOR"
+
+# The interpreter is bundled, so the macOS it was *built for* is the app's floor.
+# Homebrew builds Python for the machine it is installed on: 1.2.0 shipped a
+# Python.framework, libssl and libsqlite3 that needed macOS 27, because that is
+# what the release machine ran. python.org's installer targets old macOS, which
+# is why it is the build interpreter. Reads sysconfig's platform tag,
+# e.g. macosx-10.15-universal2 (python.org) vs macosx-27.0-arm64 (Homebrew).
+python_macos_ok() {
+    "$1" -c "
+import sys, sysconfig
+v = sysconfig.get_platform().split('-')[1]
+sys.exit(0 if tuple(map(int, v.split('.'))) <= tuple(map(int, '$MACOS_FLOOR'.split('.'))) else 1)
+" 2>/dev/null
+}
+
+# Does $1 exist, run, clear the Python floor, and target an old enough macOS?
 python_ok() {
     [ -n "${1:-}" ] || return 1
-    "$1" -c "import sys; sys.exit(0 if sys.version_info[:2] >= ($PY_FLOOR_MAJOR, $PY_FLOOR_MINOR) else 1)" 2>/dev/null
+    "$1" -c "import sys; sys.exit(0 if sys.version_info[:2] >= ($PY_FLOOR_MAJOR, $PY_FLOOR_MINOR) else 1)" 2>/dev/null \
+        && python_macos_ok "$1"
 }
 
 PYTHON="${PYTHON:-}"
 if [ -z "$PYTHON" ]; then
-    for candidate in python3.13 python3.12 python3.11 python3.10; do
-        command -v "$candidate" >/dev/null 2>&1 || continue
-        python_ok "$candidate" || continue
-        PYTHON="$(command -v "$candidate")"
-        break
+    # python.org framework installs first, by full path: Homebrew's pythonX.Y
+    # usually comes earlier on PATH and would otherwise win.
+    for minor in 14 13 12 11 10; do
+        for candidate in "/Library/Frameworks/Python.framework/Versions/3.$minor/bin/python3.$minor" \
+                         "python3.$minor"; do
+            command -v "$candidate" >/dev/null 2>&1 || continue
+            python_ok "$candidate" || continue
+            PYTHON="$(command -v "$candidate")"
+            break 2
+        done
     done
 fi
 PYTHON="${PYTHON:-python3}"
 
 if ! python_ok "$PYTHON"; then
-    echo "ERROR: $PYTHON is $("$PYTHON" -V 2>&1 || echo 'not runnable'), but this" >&2
-    echo "       project requires Python >= $PY_FLOOR (pyproject.toml)." >&2
-    echo "       Install a Python that clears it and re-run, e.g.:" >&2
-    echo "         brew install python@$PY_FLOOR" >&2
+    echo "ERROR: $PYTHON is $("$PYTHON" -V 2>&1 || echo 'not runnable') for" >&2
+    echo "       $("$PYTHON" -c 'import sysconfig; print(sysconfig.get_platform())' 2>/dev/null || echo '?')." >&2
+    echo "       The app needs Python >= $PY_FLOOR (pyproject.toml) built for" >&2
+    echo "       macOS $MACOS_FLOOR or older, because the interpreter is bundled and its" >&2
+    echo "       floor becomes the app's. Homebrew's Python targets this Mac's own" >&2
+    echo "       macOS, so it does not qualify. Install one from python.org:" >&2
+    echo "         https://www.python.org/downloads/macos/" >&2
     echo "       or point the build at one you already have:" >&2
-    echo "         PYTHON=/path/to/python$PY_FLOOR $0" >&2
+    echo "         PYTHON=/path/to/python3.X $0" >&2
     exit 1
 fi
 
@@ -112,6 +143,27 @@ pyinstaller --noconfirm --clean jamgraf.spec
 # a symlink too (updater.finish_bundle_rename), so that full old path resolves
 # here. Inside the bundle, so it is sealed by the signature like everything else.
 ln -sf Jamgraf dist/Jamgraf.app/Contents/MacOS/Waikiki
+
+# Every binary must run on MACOS_FLOOR. The interpreter check above covers
+# Python itself; this covers wheels too. pip picks the newest wheel the *build*
+# machine accepts, so a dependency that starts shipping macosx_15 wheels would
+# quietly raise the floor, and the app would still pass the smoke test below on
+# this Mac. Reads LC_BUILD_VERSION minos (vtool, from the Xcode command line tools).
+too_new="$(find dist/Jamgraf.app -type f \( -name '*.so' -o -name '*.dylib' -o -perm +111 \) -print0 \
+    | xargs -0 file | awk -F: '/Mach-O/{print $1}' \
+    | while read -r bin; do
+        minos="$(vtool -show-build "$bin" 2>/dev/null | awk '/minos/{print $2}' | sort -V | tail -1)"
+        [ -n "$minos" ] || continue
+        if [ "$(printf '%s\n%s\n' "$minos" "$MACOS_FLOOR" | sort -V | tail -1)" != "$MACOS_FLOOR" ]; then
+            echo "  needs macOS $minos: ${bin#dist/Jamgraf.app/}"
+        fi
+    done)"
+if [ -n "$too_new" ]; then
+    echo "ERROR: the bundle will not run on macOS $MACOS_FLOOR:" >&2
+    echo "$too_new" >&2
+    exit 1
+fi
+echo "==> every binary runs on macOS $MACOS_FLOOR"
 
 codesign --force --deep --sign - dist/Jamgraf.app 2>/dev/null || true
 codesign --verify --deep --strict dist/Jamgraf.app 2>/dev/null \
