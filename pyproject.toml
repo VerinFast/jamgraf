@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jamgraf"
-version = "1.1.0"
+version = "1.2.0"
 description = "A small local wiki for Human/LLM collaboration (SQLite, hybrid RAG, MCP, CRDT co-editing)."
 readme = "README.md"
 requires-python = ">=3.10"
