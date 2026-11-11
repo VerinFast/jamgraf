@@ -7,6 +7,7 @@ from html import escape as _esc
 from html import unescape as _unesc
 
 from markdown_it import MarkdownIt
+from markdown_it.common.utils import unescapeAll
 from mdit_py_plugins.anchors import anchors_plugin
 
 
@@ -67,9 +68,42 @@ def _valid_link(url: str) -> bool:
     return not (u.startswith("javascript:") or u.startswith("vbscript:"))
 
 
+def _wikilink_rule(state, silent: bool) -> bool:
+    """Hide a ``[[Wiki Link]]`` from linkify as one opaque inline token.
+
+    linkify rewrites any domain-shaped word inside a ``text`` token, and
+    ``.md``/``.py``/``.sh`` are real TLDs — so ``[[Soul.md]]`` came out as
+    ``[[<a href="http://Soul.md">…]]``, and :func:`linkify_wikilinks` then skipped
+    that anchor, leaving the wikilink broken. Code spans and fences are consumed
+    before this rule runs, so they still show ``[[Page]]`` literally.
+
+    Backslash escapes and entities are decoded here, as the ``escape`` and
+    ``entity`` rules would have done had they seen the span: ``[[A\\_B]]`` still
+    reads ``A_B`` and ``[[Salt &amp; Pepper]]`` still resolves to ``salt-pepper``."""
+    m = _WIKILINK.match(state.src, state.pos)
+    if not m:
+        return False
+    if not silent:
+        state.push("wikilink_text", "", 0).content = unescapeAll(m.group(0))
+    state.pos = m.end()
+    return True
+
+
+def _wikilinks_back_to_text(state) -> None:
+    """Once linkify has run, turn the hidden spans back into plain ``text``, so
+    heading anchors, rendering and the post-render wikilink pass see exactly what
+    they saw before."""
+    for block in state.tokens:
+        for tok in block.children or ():
+            if tok.type == "wikilink_text":
+                tok.type = "text"
+
+
 def _make_md(allow_html: bool) -> "MarkdownIt":
     md = MarkdownIt("gfm-like",
                     {"highlight": _highlight, "linkify": True, "html": allow_html})
+    md.inline.ruler.before("link", "wikilink", _wikilink_rule)
+    md.core.ruler.after("linkify", "wikilink_text", _wikilinks_back_to_text)
     md.use(anchors_plugin, min_level=1, max_level=3, slug_func=_slugify,
            permalink=True, permalinkSymbol="#")
     md.validateLink = _valid_link  # allow file:/mailto:/data: (block js:) on a local wiki
