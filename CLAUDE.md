@@ -102,6 +102,15 @@ two in parity (same substance, different voice) whenever you change either.
   external URL into an in-app destination (see `docs/deep-links.md`).
 - `jamgraf/updater.py` — self-update for the packaged `.app`: signature-verified
   download, staging, and the detached bundle swap (see `docs/updates.md`).
+- `scripts/build_macos.sh` + `jamgraf.spec` — the `.app`. **It runs on macOS 14+
+  (Apple Silicon), and the build interpreter is what decides that**: PyInstaller
+  bundles it, so a Homebrew Python (built for the release machine's own macOS)
+  made 1.2.0 need macOS 27. The script takes only a Python whose `sysconfig`
+  platform is ≤ `MACOS_FLOOR` (python.org's qualifies), exports
+  `MACOSX_DEPLOYMENT_TARGET` (the spec reads it into `LSMinimumSystemVersion`),
+  and after PyInstaller fails the build if any Mach-O's `minos` exceeds the
+  floor, since pip picks wheels for the *build* machine. onnxruntime ≥1.24 is
+  what sets 14.0.
 - `docs/rfc/0001-multi-tenant-waikiki.md` — the port-to-multi-tenant RFC.
 - `docs/repository-layer.md` — the layering spec (RFC 0001, Phase 0).
 - `docs/vendoring.md` — vendored packages, pins, and re-sync steps.
